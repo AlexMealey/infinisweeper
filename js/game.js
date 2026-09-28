@@ -53,14 +53,16 @@ window.applyChordFlag=function(prev,x,y,mutate){
     return{next,diff,flagsDelta:toFlag.length,changed:true};
 };
 window.replayMoveLog=function(activeSeed,moveLog,wrongFlags,historyRef){
-    const out={cells:{},moves:0,flags:0,gameOver:false,firstClick:null,clearedAtLastUndo:null,undoUsedCount:0,finalFlags:{}};
+    // fatalIndex: log index of the reveal that hit a mine (-1 if none) — the entry an undo rewrites.
+    // It isn't always the last entry: a room can log other players' clicks after it.
+    const out={cells:{},moves:0,flags:0,gameOver:false,fatalIndex:-1,firstClick:null,clearedAtLastUndo:null,undoUsedCount:0,finalFlags:{}};
     if(!moveLog||!moveLog.length)return out;
     const seedNum=hashSeed(activeSeed);
     const first=moveLog[0];
     out.firstClick=first&&first[0]==='r'?[first[1],first[2]]:null;
     const checker=mkChecker(seedNum,out.firstClick);
     const cells={};const curFlags={};let clearedRunning=0;
-    for(const entry of moveLog){if(out.gameOver)break;if(!entry||entry.length<3)continue;const[t,x,y]=entry;if(t==='r'){const{diff,movesDelta,gameOver:go}=applyReveal(cells,x,y,checker,wrongFlags,true);if(diff.length){recordFrame(historyRef,diff,curFlags);for(const[,v]of diff){if(v&&v[0]==='r')clearedRunning++}out.moves+=movesDelta;if(go)out.gameOver=true}}else if(t==='f'){const{diff,flagsDelta,changed}=applyFlag(cells,x,y,true);if(changed){applyDiffToFlags(curFlags,diff);out.flags+=flagsDelta}}else if(t==='u'){out.clearedAtLastUndo=clearedRunning;out.undoUsedCount++}}
+    for(let i=0;i<moveLog.length;i++){const entry=moveLog[i];if(out.gameOver)break;if(!entry||entry.length<3)continue;const[t,x,y]=entry;if(t==='r'){const{diff,movesDelta,gameOver:go}=applyReveal(cells,x,y,checker,wrongFlags,true);if(diff.length){recordFrame(historyRef,diff,curFlags);for(const[,v]of diff){if(v&&v[0]==='r')clearedRunning++}out.moves+=movesDelta;if(go){out.gameOver=true;out.fatalIndex=i}}}else if(t==='f'){const{diff,flagsDelta,changed}=applyFlag(cells,x,y,true);if(changed){applyDiffToFlags(curFlags,diff);out.flags+=flagsDelta}}else if(t==='u'){out.clearedAtLastUndo=clearedRunning;out.undoUsedCount++}}
     out.cells=cells;out.finalFlags=curFlags;return out
 };
 window.drawCellToCanvas=function(ctx,st,dx,dy,sz){

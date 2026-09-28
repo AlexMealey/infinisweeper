@@ -419,9 +419,10 @@ function App(){
         const owners=mpMoveOwnersRef.current.slice();
         for(const m of Net.pendingMoves()){
             if(m[0]==='u'){
+                // Same rule as sync.php: rewrite the latest reveal at that cell, unless it's already undone.
                 for(let i=canonical.length-1;i>=0;i--){
                     const c=canonical[i];
-                    if(c[0]==='r'&&c[1]===m[1]&&c[2]===m[2]){canonical[i]=['u',m[1],m[2]];break}
+                    if((c[0]==='r'||c[0]==='u')&&c[1]===m[1]&&c[2]===m[2]){if(c[0]==='r')canonical[i]=['u',m[1],m[2]];break}
                 }
             }else{canonical.push([m[0],m[1],m[2]]);owners.push(m[3])}
         }
@@ -668,26 +669,30 @@ function App(){
     },[gameOver]);
 
     const doUndo=useCallback(()=>{
+        if(!undoAvailable)return;
         const log=moveLogRef.current;
-        if(log.length===0)return;
-        const last=log[log.length-1];
-        if(!last||last[0]!=='r')return;
+        // Undo the reveal that hit the mine, found by replay. It's usually the last entry, but not
+        // always: a quick second click, or other players' clicks in a room, can be logged after it.
+        const fi=replayMoveLog(activeSeed,log,hints.wrongFlags,null).fatalIndex;
+        if(fi<0)return;
+        const[,fx,fy]=log[fi];
         // In a room, tell the server to rewrite that fatal 'r' entry as 'u'. The next
         // sync response will echo a full moveLog rebuild (logRevision bumps), which
         // reconciles across all clients. We still apply the change locally for zero-latency
         // feedback; until the server has it, applyServerMoves lays the pending 'u' over its log.
-        if(mpNetActiveRef.current)Net.sendMove(['u',last[1],last[2]]);
-        log[log.length-1]=['u',last[1],last[2]];
+        if(mpNetActiveRef.current)Net.sendMove(['u',fx,fy]);
+        log[fi]=['u',fx,fy];
         const out=replayMoveLog(activeSeed,log,hints.wrongFlags,null);
         curFlagsRef.current=out.finalFlags;
         timelapseRef.current=log.length?null:[];
         setCells(out.cells);setMoves(out.moves);setFlags(out.flags);setGameOver(out.gameOver);setFirstClick(out.firstClick);
         setClearedAtLastUndo(out.clearedAtLastUndo);
         setUndoUsedCount(out.undoUsedCount);
-        setShowGameOverModal(false);
+        fcProcessed.current=out.firstClick!==null;
+        setShowGameOverModal(!!out.gameOver);
         setMpGameOverBy(null);
         showStatus(mpNetActiveRef.current?'Undo applied — syncing with room':'Free undo used');
-    },[activeSeed,hints.wrongFlags,showStatus]);
+    },[undoAvailable,activeSeed,hints.wrongFlags,showStatus]);
 
 
     const hoverInfo=useMemo(()=>{
@@ -877,6 +882,8 @@ function App(){
                 <div className="flex items-center gap-1">
                     {uiSettings.showSeed&&uiSettings.showSeedBox&&<input className="hi" value={seedStr} onChange={e=>setSeedStr(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')startOver('new',seedStr)}} placeholder="seed" disabled={!!mpRoomId}/>}
                     <button onClick={()=>startOver('new')} className="hb pr" title={startOverTip}>New Seed</button>
+                    {/* Undo stays reachable after closing the game-over popup to inspect the board. */}
+                    {gameOver&&undoAvailable&&<button onClick={doUndo} className="hb pr" title="Undo the move that hit the mine">↩ Undo</button>}
                     <button onClick={()=>startOver('restart')} className="hb pr" title={startOverTip}>{gameOver?'New Game':'Restart'}</button>
                     {uiSettings.showSeed&&uiSettings.showLockBtn&&<button className={`hb ${locked?'act':''}`} onClick={()=>setLocked(l=>!l)}>{locked?'🔒':'🔓'}</button>}
                 </div>

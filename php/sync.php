@@ -7,7 +7,7 @@
 //   logRevision,        -- last logRevision the client saw (undo-rewrite counter)
 //   cursor: {x, y, cellSize} | null,
 //   moves: [ ["r"|"f"|"u", x, y], ... ]   -- moves the client made locally since last sync
-//                                            'u' is an undo request; server rewrites the last matching 'r' entry.
+//                                            'u' is an undo request; server rewrites the latest 'r' at that cell (dropped if already undone).
 //   hints: {...} | null   -- if present, merge into shared room hints (subset of allowed keys)
 //   round: int | null     -- last round the client saw; moves/reset from an older round are dropped
 //   reset: {kind: "restart"|"new"|"load", seed?, needsVote, moveLog?} | null  -- start over (see "Start over" below);
@@ -141,22 +141,25 @@ foreach ($moves as $m) {
     $y = (int)$m[2];
 
     if ($t === 'u') {
-        // Find and rewrite the last 'r' entry at (x,y). If no match, silently drop —
-        // probably a duplicate undo from a client that missed our echo.
+        // Rewrite the latest reveal at (x,y) — the one that hit the mine. If that reveal is already
+        // undone ('u'), this is a duplicate (two players pressed Undo at once): drop it rather than
+        // undoing an older, safe reveal of the same cell and spending a second undo.
         $entries = $moveLog === '' ? [] : explode(';', rtrim($moveLog, ';'));
         $found = false;
         for ($j = count($entries) - 1; $j >= 0; $j--) {
             $e = $entries[$j];
-            if ($e === '' || $e[0] !== 'r') continue;
+            if ($e === '' || ($e[0] !== 'r' && $e[0] !== 'u')) continue;
             $comma = strpos($e, ',', 1);
             if ($comma === false) continue;
             $ex = (int)substr($e, 1, $comma - 1);
             $ey = (int)substr($e, $comma + 1);
             if ($ex === $x && $ey === $y) {
-                $entries[$j] = 'u' . $x . ',' . $y;
-                // owners stay unchanged — the undo is credited to whoever made the reveal.
-                $moveLog = implode(';', $entries) . ';';
-                $found = true;
+                if ($e[0] === 'r') {
+                    $entries[$j] = 'u' . $x . ',' . $y;
+                    // owners stay unchanged — the undo is credited to whoever made the reveal.
+                    $moveLog = implode(';', $entries) . ';';
+                    $found = true;
+                }
                 break;
             }
         }
