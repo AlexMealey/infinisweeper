@@ -8,6 +8,11 @@ const MAX_NAME_LEN     = 24;
 const MAX_MOVES_PER_REQ = 50;
 const RATE_TOKENS_CAP  = 20;   // burst allowance per player
 const RATE_TOKENS_PER_SEC = 12; // refill rate — well above the 4/sec polling cadence
+const VOTE_PASS_PCT    = 51;   // share of players in the room who must agree to start over
+const VOTE_TTL_SEC     = 30;   // an unresolved start-over vote expires after this long
+const VOTE_RESULT_SEC  = 4;    // resolved votes stay visible this long so every client can show the outcome
+const EVENT_KEEP       = 20;   // recent room events kept for clients to announce ("Alex used an undo")
+const EVENT_SHOW_SEC   = 10;   // only events this recent are sent; clients dedupe by seq
 
 function data_dir(): string {
     $dir = __DIR__ . '/../data/rooms';
@@ -43,6 +48,10 @@ function sanitize_name(string $n): string {
         }
     }
     return $n;
+}
+
+function sanitize_seed(string $s): string {
+    return preg_replace('/[^A-Za-z0-9_-]/', '', substr($s, 0, 32));
 }
 
 // Deterministic color from name so a returning player keeps the same badge color.
@@ -86,7 +95,8 @@ function unlock_room($fh): void {
 }
 
 // Fresh room skeleton. hints defaults match the client's migrateHints().
-function new_room_state(string $seed, ?array $hints): array {
+// $founderId is the creator's playerId: they can start over without a vote.
+function new_room_state(string $seed, ?array $hints, string $founderId): array {
     $defaultHints = [
         'wrongFlags'      => false,
         'pulseNeighbors'  => false,
@@ -105,6 +115,9 @@ function new_room_state(string $seed, ?array $hints): array {
         'moveLog'      => '',
         'moveOwners'   => '',
         'players'      => new stdClass(),
+        'founderId'    => $founderId,
+        'round'        => 0,           // bumped every time the room starts over; clients drop stale-round moves
+        'resetVote'    => null,        // open or recently resolved start-over vote, see tally_reset_vote()
         'createdAt'    => time(),
         'lastActivity' => time(),
     ];
@@ -137,6 +150,92 @@ function prune_stale_players(array &$room): void {
             unset($room['players'][$pid]);
         }
     }
+}
+
+// Wipe the board for a fresh round ('restart' keeps the seed, 'new' switches to $seed or a random one).
+// Works on sync.php's move-log locals, which it persists at the end of the request.
+function reset_round(array &$room, string &$moveLog, string &$moveOwners, int &$logRev, string $kind, ?string $seed): void {
+    if ($kind === 'new') $room['seed'] = ($seed !== null && $seed !== '') ? $seed : bin2hex(random_bytes(4));
+    $moveLog    = '';
+    $moveOwners = '';
+    $logRev++;                  // makes every client rebuild from the (now empty) full log
+    $room['round']     = (int)($room['round'] ?? 0) + 1;
+    $room['resetVote'] = null;  // a reset settles any open vote
+}
+
+// Record something the other players should be told about, so the board doesn't just change under
+// them: 'undo', 'restart' or 'new'. Clients show each seq once.
+function add_event(array &$room, string $type, string $playerId, string $name): void {
+    $seq = (int)($room['eventSeq'] ?? 0) + 1;
+    $room['eventSeq'] = $seq;
+    $events   = $room['events'] ?? [];
+    $events[] = ['seq' => $seq, 'type' => $type, 'by' => $playerId, 'byName' => $name, 'at' => time()];
+    $room['events'] = array_slice($events, -EVENT_KEEP);
+}
+
+function recent_events(array $room): array {
+    $cutoff = time() - EVENT_SHOW_SEC;
+    $out = [];
+    foreach ($room['events'] ?? [] as $e) {
+        if ($e['at'] >= $cutoff) $out[] = ['seq' => $e['seq'], 'type' => $e['type'], 'by' => $e['by'], 'byName' => $e['byName']];
+    }
+    return $out;
+}
+
+function vote_needed(int $total): int {
+    return intdiv($total * VOTE_PASS_PCT + 99, 100); // ceil without floats: 2 players → 2, 3 → 2, 4 → 3
+}
+
+// Tally the reset vote against the players currently in the room. Votes from players who have
+// left don't count, and the lobby size shrinks with them. Returns [yes, no, total].
+function count_votes(array $room): array {
+    $players = $room['players'] ?? [];
+    $yes = 0; $no = 0;
+    foreach (($room['resetVote']['votes'] ?? []) as $pid => $choice) {
+        if (!isset($players[$pid])) continue;
+        if ($choice) $yes++; else $no++;
+    }
+    return [$yes, $no, max(1, count($players))];
+}
+
+// Resolve the open reset vote once it's decided. Returns 'passed' | 'failed' | 'expired', or null
+// while it's still open (or there's no vote). Resolved votes are cleared after VOTE_RESULT_SEC.
+function tally_reset_vote(array &$room): ?string {
+    $v = $room['resetVote'] ?? null;
+    if (!is_array($v)) return null;
+    if ($v['status'] !== 'open') {
+        if (time() - ($v['resolvedAt'] ?? 0) > VOTE_RESULT_SEC) $room['resetVote'] = null;
+        return null;
+    }
+    [$yes, $no, $total] = count_votes($room);
+    $needed = vote_needed($total);
+    if ($yes >= $needed)                             $result = 'passed';
+    elseif ($total - $no < $needed)                  $result = 'failed'; // can no longer reach the threshold
+    elseif (time() - $v['createdAt'] > VOTE_TTL_SEC) $result = 'expired';
+    else return null;
+    $room['resetVote']['status']     = $result;
+    $room['resetVote']['resolvedAt'] = time();
+    return $result;
+}
+
+// What clients see of the reset vote: live tallies plus this player's own answer (true/false/null).
+function public_vote(array $room, string $playerId): ?array {
+    $v = $room['resetVote'] ?? null;
+    if (!is_array($v)) return null;
+    [$yes, $no, $total] = count_votes($room);
+    return [
+        'id'          => $v['id'],
+        'by'          => $v['by'],
+        'byName'      => $v['byName'] ?? 'Player',
+        'kind'        => $v['kind'],
+        'status'      => $v['status'],
+        'yes'         => $yes,
+        'no'          => $no,
+        'total'       => $total,
+        'needed'      => vote_needed($total),
+        'myVote'      => $v['votes'][$playerId] ?? null,
+        'secondsLeft' => max(0, VOTE_TTL_SEC - (time() - $v['createdAt'])),
+    ];
 }
 
 // Best-effort room GC. Called opportunistically from create-room.php; not on the hot path.

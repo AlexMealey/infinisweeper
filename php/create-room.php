@@ -11,7 +11,7 @@ require_post();
 $body = read_json_body();
 
 $seed = isset($body['seed']) && is_string($body['seed']) && $body['seed'] !== ''
-    ? preg_replace('/[^A-Za-z0-9_-]/', '', substr($body['seed'], 0, 32))
+    ? sanitize_seed($body['seed'])
     : bin2hex(random_bytes(4));
 
 $hints = isset($body['hints']) && is_array($body['hints']) ? $body['hints'] : null;
@@ -23,7 +23,7 @@ $playerId = gen_id(8);
 // It's cheap (a glob() + filemtime() scan) and only runs at room-creation cadence.
 gc_rooms();
 
-$state = new_room_state($seed, $hints);
+$state = new_room_state($seed, $hints, $playerId); // the creator is the room's founder
 $path = room_path($roomId);
 $fh = fopen($path, 'x'); // 'x' fails if the file exists — collisions on 16-byte IDs are ~impossible but let's be safe
 if (!$fh) error_response('room id collision, please retry', 500);

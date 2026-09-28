@@ -57,6 +57,12 @@ body{background:#080816;min-height:100vh;display:flex;flex-direction:column;alig
 .lb-row.lb-alt{background:rgba(255,255,255,.045)}
 .lb-row.lb-mine{background:rgba(99,102,241,.28);color:#fff}
 .lb-empty{color:#666;font-size:12px;text-align:center;padding:8px 0;white-space:nowrap}
+.toast-stack{position:fixed;top:48px;right:12px;z-index:300;display:flex;flex-direction:column;align-items:flex-end;gap:8px;max-width:min(320px,calc(100vw - 24px));pointer-events:none}
+.toast{pointer-events:auto;background:#1a1a32;border:1px solid #3a3a5c;border-left:3px solid #6366f1;border-radius:8px;padding:10px 14px;color:#ddd;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.6);animation:tslide .2s ease}
+.toast-title{color:#fff;font-weight:600}
+.toast-sub{color:#8b8ba8;font-size:12px;margin-top:3px}
+.toast-actions{display:flex;gap:6px;margin-top:8px}
+@keyframes tslide{from{transform:translateX(16px);opacity:0}to{transform:none;opacity:1}}
 
 @media (prefers-color-scheme: light) {
     body { background: #080816; }

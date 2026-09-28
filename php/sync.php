@@ -9,6 +9,9 @@
 //   moves: [ ["r"|"f"|"u", x, y], ... ]   -- moves the client made locally since last sync
 //                                            'u' is an undo request; server rewrites the last matching 'r' entry.
 //   hints: {...} | null   -- if present, merge into shared room hints (subset of allowed keys)
+//   round: int | null     -- last round the client saw; moves/reset from an older round are dropped
+//   reset: {kind: "restart"|"new", seed?, needsVote} | null  -- start over (see "Start over" below)
+//   vote:  {id, yes} | null                                   -- answer to the open reset vote
 // }
 // Returns:
 // {
@@ -19,7 +22,11 @@
 //   moveLog?, moveOwners?,                         -- present ONLY when logRevision jumped: rebuild from these
 //   players: { <pid>: {name, color, cursor, lastSeen} },
 //   hints,                                         -- included on every response for simplicity
-//   seed
+//   seed,
+//   founderId,                                     -- playerId of the room creator
+//   round,                                         -- bumps every time the room starts over
+//   resetVote: {id, by, byName, kind, status, yes, no, total, needed, myVote, secondsLeft} | null,
+//   events: [ {seq, type: "undo"|"restart"|"new", by, byName}, ... ]  -- last few seconds only
 // }
 
 require __DIR__ . '/lib.php';
@@ -37,6 +44,9 @@ $view         = $body['view']   ?? null;  // viewport center in world coords —
 $moves        = is_array($body['moves'] ?? null) ? $body['moves'] : [];
 $clientLogRev = isset($body['logRevision']) ? (int)$body['logRevision'] : 0;
 $clientHints  = (isset($body['hints']) && is_array($body['hints'])) ? $body['hints'] : null;
+$resetReq     = (isset($body['reset']) && is_array($body['reset'])) ? $body['reset'] : null;
+$voteReply    = (isset($body['vote'])  && is_array($body['vote']))  ? $body['vote']  : null;
+$clientRound  = (isset($body['round']) && is_numeric($body['round'])) ? (int)$body['round'] : null;
 
 if (!valid_id($roomId))   error_response('bad roomId');
 if (!valid_id($playerId)) error_response('bad playerId');
@@ -114,6 +124,13 @@ $moveOwners = $room['moveOwners'] ?? '';
 $moveLog    = $room['moveLog'] ?? '';
 $logRev     = (int)($room['logRevision'] ?? 0);
 
+// Moves and reset requests made on a board that has since been reset belong to the old round.
+// Applying them would put stale clicks on the fresh board (or reset it twice), so drop them.
+if ($clientRound !== null && $clientRound !== (int)($room['round'] ?? 0)) {
+    $moves    = [];
+    $resetReq = null;
+}
+
 $appended = 0;
 foreach ($moves as $m) {
     if (!is_array($m) || count($m) < 3) continue;
@@ -145,6 +162,7 @@ foreach ($moves as $m) {
         if ($found) {
             $logRev++;
             $appended++;
+            add_event($room, 'undo', $playerId, $name);
         }
     } else {
         $moveLog    .= $t . $x . ',' . $y . ';';
@@ -153,15 +171,53 @@ foreach ($moves as $m) {
     }
 }
 
+// --- Start over (restart the same seed, or switch to a new one) ---
+// The founder resets straight away. So does anyone whose client says nothing is at stake (no moves
+// yet, or a lost game with no undos left). Anyone else opens a vote that needs VOTE_PASS_PCT of the
+// players in the room; the requester's own vote counts as yes.
+$voteBefore = $room['resetVote'] ?? null;
+if ($resetReq !== null) {
+    $kind      = ($resetReq['kind'] ?? '') === 'new' ? 'new' : 'restart';
+    $seed      = (isset($resetReq['seed']) && is_string($resetReq['seed'])) ? sanitize_seed($resetReq['seed']) : null;
+    $isFounder = isset($room['founderId']) && $room['founderId'] === $playerId;
+    if ($isFounder || empty($resetReq['needsVote'])) {
+        reset_round($room, $moveLog, $moveOwners, $logRev, $kind, $seed);
+        add_event($room, $kind, $playerId, $name);
+    } elseif (($voteBefore['status'] ?? null) !== 'open') {
+        $room['resetVote'] = [
+            'id'        => gen_id(4),
+            'by'        => $playerId,
+            'byName'    => $name,
+            'kind'      => $kind,
+            'seed'      => $seed,
+            'votes'     => [$playerId => true],
+            'createdAt' => time(),
+            'status'    => 'open',
+        ];
+    }
+}
+if ($voteReply !== null && ($room['resetVote']['status'] ?? null) === 'open'
+        && ($voteReply['id'] ?? null) === $room['resetVote']['id']) {
+    $room['resetVote']['votes'][$playerId] = !empty($voteReply['yes']);
+}
+
+// Prune before tallying so players who left neither block the vote nor count toward the lobby size.
+prune_stale_players($room);
+if (tally_reset_vote($room) === 'passed') {
+    $passed = $room['resetVote'];
+    reset_round($room, $moveLog, $moveOwners, $logRev, $passed['kind'], $passed['seed']);
+    $room['resetVote'] = $passed; // reset_round clears the vote; keep the result visible briefly
+}
+$stateChanged = $resetReq !== null || $voteReply !== null || ($room['resetVote'] ?? null) !== $voteBefore;
+
 // --- Bump version and persist ---
-if ($appended > 0 || $cursor !== null || $view !== null || $clientHints !== null || !isset($room['version'])) {
+if ($appended > 0 || $cursor !== null || $view !== null || $clientHints !== null || $stateChanged || !isset($room['version'])) {
     $room['version']      = ($room['version'] ?? 0) + 1;
     $room['moveLog']      = $moveLog;
     $room['moveOwners']   = $moveOwners;
     $room['logRevision']  = $logRev;
     $room['lastActivity'] = time();
 }
-prune_stale_players($room);
 
 save_room_and_unlock($room, $fh);
 
@@ -185,6 +241,10 @@ $response = [
     }, $room['players']),
     'hints'       => $room['hints'] ?? new stdClass(),
     'seed'        => $room['seed'] ?? '',
+    'founderId'   => $room['founderId'] ?? null,
+    'round'       => (int)($room['round'] ?? 0),
+    'resetVote'   => public_vote($room, $playerId),
+    'events'      => recent_events($room),
 ];
 
 if ($clientLogRev < $logRev) {

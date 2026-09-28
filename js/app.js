@@ -83,6 +83,22 @@ function App(){
     const mpLastSyncedHintsRef=useRef(null);
     // Backoff signal from Net.js (populated only while sync is failing).
     const[mpBackoff,setMpBackoff]=useState(null);
+    // Room creator's playerId — they can start over without a vote.
+    const[mpFounderId,setMpFounderId]=useState(null);
+    // Open (or just-resolved) start-over vote from the server, or null.
+    const[mpResetVote,setMpResetVote]=useState(null);
+    // Last server round seen; a change means the room started over. null until the first sync.
+    const mpRoundRef=useRef(null);
+    // Top-right notices about what other players did ("Alex used an undo").
+    const[mpToasts,setMpToasts]=useState([]);
+    const mpToastIdRef=useRef(0);
+    // Highest room event seq already handled; null until the first sync.
+    const mpEventSeqRef=useRef(null);
+    const pushToast=useCallback(text=>{
+        const id=++mpToastIdRef.current;
+        setMpToasts(ts=>[...ts.slice(-3),{id,text}]);
+        setTimeout(()=>setMpToasts(ts=>ts.filter(t=>t.id!==id)),5000);
+    },[]);
 
     const lastSave=useRef('');
     const lastSaveSig=useRef('');
@@ -423,6 +439,8 @@ function App(){
     useEffect(()=>{
         if(!mpRoomId||!mpName||!mpPlayerId)return;
         mpNetActiveRef.current=true;
+        mpRoundRef.current=null;
+        mpEventSeqRef.current=null;
         Net.start({
             roomId:mpRoomId,
             playerId:mpPlayerId,
@@ -431,6 +449,31 @@ function App(){
             onBackoff:info=>setMpBackoff(info),
             onSync:data=>{
                 if(data.players)setMpPlayers(data.players);
+                setMpFounderId(data.founderId||null);
+                setMpResetVote(data.resetVote||null);
+                if(typeof data.round==='number'){
+                    // Someone started over. The replay below clears the board; this covers the
+                    // per-run bits it doesn't: a fresh leaderboard run and a recentred view.
+                    if(mpRoundRef.current!==null&&data.round!==mpRoundRef.current){
+                        runIdRef.current=genRunId();
+                        setViewX(0);setViewY(0);
+                        showStatus('New round started');
+                    }
+                    mpRoundRef.current=data.round;
+                }
+                if(Array.isArray(data.events)){
+                    // Announce each of the other players' actions once. The server only sends the
+                    // last few seconds of events; ones already there when we joined are skipped.
+                    const seen=mpEventSeqRef.current;
+                    let max=seen===null?0:seen;
+                    for(const ev of data.events){
+                        if(ev.seq>max)max=ev.seq;
+                        if(seen===null||ev.seq<=seen||ev.by===mpPlayerId)continue;
+                        const msg={undo:'used an undo',restart:'restarted the board',new:'started a new game'}[ev.type];
+                        if(msg)pushToast(`${ev.byName} ${msg}`);
+                    }
+                    mpEventSeqRef.current=max;
+                }
                 if(data.seed&&data.seed!==activeSeed){setActiveSeed(data.seed);setSeedStr(data.seed);}
                 if(data.hints){
                     // Cache the server value BEFORE calling setHints so the hint-sync effect
@@ -445,7 +488,7 @@ function App(){
         return()=>{Net.stop();mpNetActiveRef.current=false};
     // activeSeed intentionally omitted from deps — Net starts once per (room, name, playerId).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    },[mpRoomId,mpName,mpPlayerId,applyServerMoves]);
+    },[mpRoomId,mpName,mpPlayerId,applyServerMoves,pushToast]);
 
     // --- Multiplayer: track own cursor and forward at ~10 Hz to the server ---
     useEffect(()=>{
@@ -544,6 +587,29 @@ function App(){
     const clearedUntilNextUndo=undoStack
         ?(1000-(clearedCount%1000))
         :(clearedAtLastUndo===null?0:Math.max(0,1000-(clearedCount-clearedAtLastUndo)));
+
+    const mpIsFounder=!!(mpRoomId&&mpPlayerId&&mpFounderId===mpPlayerId);
+    // Restart ('restart', same seed) or start a new game ('new', seed defaults to random).
+    // Asks first when there's something to lose: a game in progress, or a lost game an undo could
+    // still rescue. In a room the founder decides alone; anyone else's request goes to a vote
+    // that needs 51% of the room (enforced server-side).
+    const startOver=(kind,seed)=>{
+        const atStake=moveLogRef.current.length>0&&(!gameOver||undoAvailable);
+        const act=kind==='new'?'start a new game with a new seed':'restart this board';
+        if(!mpRoomId){
+            if(atStake&&!confirm(`Are you sure you want to ${act}? Your current progress will be lost.`))return;
+            if(kind==='new')applySeed(seed||rndSeed());else restart();
+            return;
+        }
+        if(!mpNetActiveRef.current)return;
+        const needsVote=atStake&&!mpIsFounder;
+        if(atStake&&!confirm(needsVote
+            ?`Start a vote to ${act}? At least 51% of the room must agree.`
+            :`Are you sure you want to ${act} for everyone in the room? Current progress will be lost.`))return;
+        Net.requestReset(kind,kind==='new'?(seed||rndSeed()):null,needsVote);
+        showStatus(needsVote?'Vote started — waiting for the room':'Starting over…');
+    };
+    const startOverTip=mpRoomId&&!mpIsFounder?'Mid-game, needs 51% of the room to agree':undefined;
 
     useEffect(()=>{
         if(gameOver)setShowGameOverModal(true);
@@ -762,8 +828,8 @@ function App(){
                 undoStackCount={undoStackCount}
                 videoExporting={videoExporting}
                 onUndo={doUndo}
-                onRestart={()=>{restart();setShowGameOverModal(false)}}
-                onNewSeed={()=>{applySeed(rndSeed());setShowGameOverModal(false)}}
+                onRestart={()=>startOver('restart')}
+                onNewSeed={()=>startOver('new')}
                 onExportImage={()=>handleExportImage(true)}
                 onExportVideo={()=>handleExportVideo()}
                 onClose={()=>setShowGameOverModal(false)}
@@ -771,8 +837,8 @@ function App(){
                 lastEntryDate={lastEntryDate}
                 killerName={mpKillerName}
                 killerIsSelf={mpKillerIsSelf}
-                inRoom={!!mpRoomId}
             />}
+            {mpRoomId&&<ToastStack toasts={mpToasts} vote={mpResetVote} selfId={mpPlayerId} onVote={(id,yes)=>Net.vote(id,yes)}/>}
             {showSettings&&<SettingsModal
                 hints={hints} setHints={setHints}
                 uiSettings={uiSettings} setUiSettings={setUiSettings}
@@ -785,13 +851,13 @@ function App(){
                 {mpRoomId
                     ?<>
                         <MultiplayerBadge status={mpStatus} backoff={mpBackoff} onCopyInvite={handleCopyInvite} onLeave={handleLeaveRoom}/>
-                        <PlayerListDropdown players={mpPlayers} selfId={mpPlayerId} onGoTo={handleGoToPlayer}/>
+                        <PlayerListDropdown players={mpPlayers} selfId={mpPlayerId} founderId={mpFounderId} onGoTo={handleGoToPlayer}/>
                     </>
                     :<button className="hb" onClick={handleCreateRoom} title="Create a shared room and invite someone">👥 Play with a friend</button>}
                 <div className="flex items-center gap-1">
-                    {uiSettings.showSeed&&uiSettings.showSeedBox&&<input className="hi" value={seedStr} onChange={e=>setSeedStr(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')applySeed(seedStr)}} placeholder="seed" disabled={!!mpRoomId}/>}
-                    <button onClick={()=>applySeed(rndSeed())} className="hb pr" disabled={!!mpRoomId}>New Seed</button>
-                    <button onClick={restart} className="hb pr" disabled={!!mpRoomId}>{gameOver?'New Game':'Restart'}</button>
+                    {uiSettings.showSeed&&uiSettings.showSeedBox&&<input className="hi" value={seedStr} onChange={e=>setSeedStr(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')startOver('new',seedStr)}} placeholder="seed" disabled={!!mpRoomId}/>}
+                    <button onClick={()=>startOver('new')} className="hb pr" title={startOverTip}>New Seed</button>
+                    <button onClick={()=>startOver('restart')} className="hb pr" title={startOverTip}>{gameOver?'New Game':'Restart'}</button>
                     {uiSettings.showSeed&&uiSettings.showLockBtn&&<button className={`hb ${locked?'act':''}`} onClick={()=>setLocked(l=>!l)}>{locked?'🔒':'🔓'}</button>}
                 </div>
                 <GameDropdown onExport={handleExport} onImport={handleImport} onClear={clearSave} onExportImage={handleExportImage} onExportVideo={handleExportVideo} videoExporting={videoExporting}/>

@@ -5,6 +5,8 @@
 //   Net.start({roomId, playerId, name, onSync: ({newMoves, players, hints, seed}) => {...}})
 //   Net.sendMove(['r', 5, 3])   // called after a local move is applied
 //   Net.sendCursor(worldX, worldY, cellSize)  // called on mousemove
+//   Net.requestReset('restart'|'new', seed, needsVote)  // start over, or ask the room to
+//   Net.vote(voteId, yes)                     // answer an open start-over vote
 //   Net.stop()
 //
 // One sync request per tick carries both directions: outgoing (queued moves +
@@ -26,6 +28,9 @@
     let pendingCursor = null;    // latest cursor, to be sent on next sync
     let pendingHints = null;     // shared hints to push next sync (null = don't send)
     let currentView = null;      // latest viewport center in world coords — sent every tick when set
+    let round = null;            // last-seen server round (bumps when the room starts over); null until first sync
+    let pendingReset = null;     // start-over request to send next sync
+    let pendingVote = null;      // our answer to an open start-over vote
     let lastCursorSent = 0;
     let errStreak = 0;
 
@@ -45,6 +50,10 @@
         // Snapshot pending hints similarly so a mid-request change queues for the next tick.
         const hints = pendingHints;
         pendingHints = null;
+        const reset = pendingReset;
+        pendingReset = null;
+        const vote = pendingVote;
+        pendingVote = null;
 
         try {
             const body = {
@@ -58,6 +67,11 @@
                 view: currentView,
                 moves,
                 hints,
+                // Server drops moves/reset tagged with an old round, so clicks made just before
+                // someone else's reset don't land on the fresh board.
+                round,
+                reset,
+                vote,
             };
             const res = await fetch(cfg.endpoint, {
                 method: 'POST',
@@ -74,12 +88,15 @@
             if (typeof data.version === 'number') sinceVersion = data.version;
             if (typeof data.moveIndex === 'number') moveIndex = data.moveIndex;
             if (typeof data.logRevision === 'number') logRevision = data.logRevision;
+            if (typeof data.round === 'number') round = data.round;
             if (cfg.onSync) cfg.onSync(data);
         } catch (err) {
             // Put unsent moves back at the head of the queue so nothing is dropped.
             outMoves = moves.concat(outMoves);
             // Requeue hints too so a transient error doesn't lose the user's toggle.
             if (hints && !pendingHints) pendingHints = hints;
+            if (reset && !pendingReset) pendingReset = reset;
+            if (vote && !pendingVote) pendingVote = vote;
             errStreak++;
             if (cfg.onStatus) cfg.onStatus('disconnected');
             if (cfg.onError) cfg.onError(err);
@@ -108,6 +125,9 @@
             pendingCursor = null;
             pendingHints = null;
             currentView = null;
+            round = null;
+            pendingReset = null;
+            pendingVote = null;
             errStreak = 0;
             // First tick fires immediately so the client gets initial state without a 300ms wait.
             tick();
@@ -130,6 +150,16 @@
             // Shared gameplay hints only — UI settings never round-trip through here.
             if (!running || !hints) return;
             pendingHints = hints;
+        },
+        requestReset(kind, seed, needsVote){
+            // kind: 'restart' keeps the seed, 'new' switches to seed (server picks one if empty).
+            // needsVote: there's progress at stake, so a non-founder's request goes to a room vote.
+            if (!running) return;
+            pendingReset = {kind, seed: seed || null, needsVote: !!needsVote};
+        },
+        vote(id, yes){
+            if (!running) return;
+            pendingVote = {id, yes: !!yes};
         },
         setView(x, y){
             // Viewport center in world coords. Sent every tick so other players can "go to" us.

@@ -169,7 +169,7 @@ window.LeaderboardDropdown=function LeaderboardDropdown({entries,currentScore}){
     </div>);
 };
 
-window.GameOverModal=function GameOverModal({undoAvailable,undoInfinite,undoStack,undoStackCount,onUndo,onRestart,onNewSeed,onExportImage,onExportVideo,onClose,videoExporting,leaderboard,lastEntryDate,killerName,killerIsSelf,inRoom}){
+window.GameOverModal=function GameOverModal({undoAvailable,undoInfinite,undoStack,undoStackCount,onUndo,onRestart,onNewSeed,onExportImage,onExportVideo,onClose,videoExporting,leaderboard,lastEntryDate,killerName,killerIsSelf}){
     const[closeLockSecs,setCloseLockSecs]=useState(5);
     useEffect(()=>{
         if(closeLockSecs<=0)return;
@@ -185,8 +185,8 @@ window.GameOverModal=function GameOverModal({undoAvailable,undoInfinite,undoStac
             <h2>💥 Game Over</h2>
             <div className="sub">{killerName&&!killerIsSelf?`${killerName} hit a mine.`:'You hit a mine.'}</div>
             {undoAvailable&&<button className="primary" onClick={guardedUndo}>↩ Undo{undoInfinite?' (∞)':undoStack?` (${undoStackCount} banked)`:' (1 left)'}</button>}
-            <button onClick={onRestart} disabled={inRoom}>{inRoom?'🔄 Restart (host only — TBD)':'🔄 Restart (same seed)'}</button>
-            <button onClick={onNewSeed} disabled={inRoom}>{inRoom?'🎲 New Seed (leave room first)':'🎲 New Seed'}</button>
+            <button onClick={onRestart}>🔄 Restart (same seed)</button>
+            <button onClick={onNewSeed}>🎲 New Seed</button>
             <button onClick={onExportImage}>🖼 Export Image</button>
             <button onClick={onExportVideo} disabled={videoExporting}>{videoExporting?'Exporting timelapse…':'🎬 Export Timelapse'}</button>
             <div className="close-row"><button className="close-btn" onClick={guardedClose} disabled={locked}>{locked?`Wait ${closeLockSecs}s…`:'Close (inspect board)'}</button></div>
@@ -254,10 +254,46 @@ window.CursorOverlay=function CursorOverlay({players,selfId,viewX,viewY,cellSize
     );
 };
 
+// Top-right stack of room notifications: the start-over vote (while open or just resolved) and
+// short-lived notices like "Alex used an undo", so board changes made by others don't come out of
+// nowhere. Sits above modals, since the game-over modal may be open for everyone when a vote starts.
+window.ToastStack=function ToastStack({toasts,vote,selfId,onVote}){
+    if(!vote&&!toasts.length)return null;
+    return(
+        <div className="toast-stack">
+            {vote&&<ResetVoteToast key={vote.id} vote={vote} selfId={selfId} onVote={onVote}/>}
+            {toasts.map(t=><div key={t.id} className="toast">{t.text}</div>)}
+        </div>
+    );
+};
+
+// The start-over vote. Everyone sees it; players who haven't answered get Yes/No.
+// Tallies and the countdown come from the server on every sync.
+window.ResetVoteToast=function ResetVoteToast({vote,selfId,onVote}){
+    // Set once we've answered, so the buttons hide before the server echoes our vote back.
+    const[answeredLocally,setAnsweredLocally]=useState(false);
+    const what=vote.kind==='new'?'start a new game with a new seed':'restart this board';
+    const open=vote.status==='open';
+    const answered=(vote.myVote!==null&&vote.myVote!==undefined)||answeredLocally;
+    const answer=yes=>{setAnsweredLocally(true);onVote(vote.id,yes)};
+    const result={passed:'✓ Vote passed — starting over',failed:'✗ Not enough players agreed',expired:'✗ Vote timed out'}[vote.status];
+    return(
+        <div className="toast">
+            <div className="toast-title">{vote.by===selfId?`You asked to ${what}`:`${vote.byName} wants to ${what}`}</div>
+            <div className="toast-sub">{open?`${vote.yes} of ${vote.total} agree · ${vote.needed} needed · ${vote.secondsLeft}s left`:result}</div>
+            {open&&!answered&&<div className="toast-actions">
+                <button className="hb pr" onClick={()=>answer(true)}>Yes, start over</button>
+                <button className="hb" onClick={()=>answer(false)}>No, keep playing</button>
+            </div>}
+            {open&&answered&&<div className="toast-sub">Waiting for the others…</div>}
+        </div>
+    );
+};
+
 // Dropdown listing all players in the room. Clicking a name jumps your viewport
 // so you're centered on the same coordinates the other player is centered on
 // (uses player.view, not player.cursor — the goal is "see what they see").
-window.PlayerListDropdown=function PlayerListDropdown({players,selfId,onGoTo}){
+window.PlayerListDropdown=function PlayerListDropdown({players,selfId,founderId,onGoTo}){
     const[open,setOpen]=useState(false);
     const ref=useRef(null);
     useEffect(()=>{if(!open)return;const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false)};document.addEventListener('mousedown',h);return()=>document.removeEventListener('mousedown',h)},[open]);
@@ -280,7 +316,7 @@ window.PlayerListDropdown=function PlayerListDropdown({players,selfId,onGoTo}){
                              onMouseEnter={e=>{if(canGo)e.currentTarget.style.background='rgba(99,102,241,0.15)'}}
                              onMouseLeave={e=>{e.currentTarget.style.background='transparent'}}>
                             <span style={{width:10,height:10,borderRadius:'50%',background:p.color||'#5b9bd5',flexShrink:0}}/>
-                            <span style={{color:isMe?'#a78bfa':'#eee',fontSize:12,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.name||'Player'}{isMe&&' (you)'}</span>
+                            <span style={{color:isMe?'#a78bfa':'#eee',fontSize:12,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.name||'Player'}{isMe&&' (you)'}{pid===founderId&&<span title="Room founder — can start over without a vote"> 👑</span>}</span>
                             {p.view&&<span style={{color:'#888',fontSize:10}}>{p.view.x},{p.view.y}</span>}
                         </div>
                     );
