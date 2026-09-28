@@ -63,6 +63,16 @@ body{background:#080816;min-height:100vh;display:flex;flex-direction:column;alig
 .toast-sub{color:#8b8ba8;font-size:12px;margin-top:3px}
 .toast-actions{display:flex;gap:6px;margin-top:8px}
 @keyframes tslide{from{transform:translateX(16px);opacity:0}to{transform:none;opacity:1}}
+.start-panel{width:400px;min-width:0;max-height:90vh;overflow-y:auto}
+.start-panel button{text-align:center}
+.start-panel .start-choice{padding:14px 16px;font-size:16px}
+.start-panel .hi{width:100%;min-width:0;font-size:14px;padding:6px 8px}
+.start-field{display:flex;flex-direction:column;gap:4px}
+.start-label{color:#8b8ba8;font-size:12px;font-weight:700;letter-spacing:.09em;text-transform:uppercase}
+.start-row{display:flex;gap:6px}
+.start-row .hi{flex:1}
+.start-panel .start-icon{padding:4px 10px;font-size:16px}
+.start-error{color:#f87171;font-size:12px}
 
 @media (prefers-color-scheme: light) {
     body { background: #080816; }

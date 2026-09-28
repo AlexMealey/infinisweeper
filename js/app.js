@@ -69,6 +69,14 @@ function App(){
     const mpSelfIdShort=useMemo(()=>mpPlayerId?mpPlayerId.slice(0,8):null,[mpPlayerId]);
     const[mpName,setMpName]=useState(()=>localStorage.getItem('minesweeper_name')||'');
     const[mpNamePromptOpen,setMpNamePromptOpen]=useState(!!mpRoomId&&!localStorage.getItem('minesweeper_name'));
+    // Start menu (singleplayer / multiplayer) on a fresh visit: not in a room, no saved game to restore.
+    const[showStart,setShowStart]=useState(()=>{
+        if(mpRoomId)return false;
+        try{
+            const s=JSON.parse(localStorage.getItem('minesweeper_save')||'null');
+            if(s&&(s.version===1?s.cells&&Object.keys(s.cells).length:s.moveLog&&s.moveLog.length))return false;
+        }catch(e){}
+        return true});
     const[mpPlayers,setMpPlayers]=useState({});
     const[mpStatus,setMpStatus]=useState('connecting');
     // Canonical, server-ordered move log for this room. Rebuilt state comes from replaying this.
@@ -496,7 +504,11 @@ function App(){
                 }
                 applyServerMoves(data.seed||activeSeed,data,data.hints&&data.hints.wrongFlags);
             },
-            onError:e=>console.warn('sync error',e),
+            onError:e=>{
+                console.warn('sync error',e);
+                // A mistyped session code, or a session that expired (rooms are deleted after a day idle).
+                if(e&&e.message==='HTTP 404')showStatus('Session not found. Check the code, or create a new session.');
+            },
         });
         return()=>{Net.stop();mpNetActiveRef.current=false};
     // activeSeed intentionally omitted from deps — Net starts once per (room, name, playerId).
@@ -783,10 +795,9 @@ function App(){
     const isFS=viewMode==='Fullscreen';
     const cStyle=isFS?{width:'100vw',height:'calc(100vh - 42px)'}:{width:VIEWS[viewMode]?.w||800,height:VIEWS[viewMode]?.h||600,borderRadius:8,border:'1px solid #2a2a4a',boxShadow:'0 4px 30px rgba(0,0,0,.5)'};
 
-    // --- Multiplayer helpers used by header buttons ---
+    // --- Multiplayer helpers used by header buttons and the start menu ---
     // Resolves true only if the link actually reached the clipboard.
-    const handleCopyInvite=useCallback(async()=>{
-        const url=window.location.href;
+    const copyLink=useCallback(async url=>{
         let ok=false;
         if(navigator.clipboard&&navigator.clipboard.writeText){
             try{await navigator.clipboard.writeText(url);ok=true}catch(e){}
@@ -805,29 +816,35 @@ function App(){
         else window.prompt('Copy this invite link:',url);
         return ok;
     },[showStatus]);
+    const handleCopyInvite=useCallback(()=>copyLink(window.location.href),[copyLink]);
     const handleLeaveRoom=useCallback(()=>{
         // Bounce back to the base URL — drops ?room, single-player takes over from there.
         window.location.href=window.location.pathname;
     },[]);
+    // Makes a room on the server and keeps our founder playerId for it. Resolves to the roomId.
+    const createRoom=useCallback(async(seed,roomHints)=>{
+        const res=await fetch('./php/create-room.php',{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({seed,hints:roomHints}),
+            cache:'no-store',
+        });
+        if(!res.ok)throw new Error('HTTP '+res.status);
+        const data=await res.json();
+        if(!data.roomId)throw new Error('no roomId in response');
+        localStorage.setItem('minesweeper_room_'+data.roomId,data.playerId);
+        return data.roomId;
+    },[]);
+    const joinRoom=useCallback(roomId=>{window.location.search='?room='+roomId},[]);
     const handleCreateRoom=useCallback(async()=>{
         try{
             showStatus('Creating room…');
-            const res=await fetch('./php/create-room.php',{
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({seed:activeSeed,hints}),
-                cache:'no-store',
-            });
-            if(!res.ok)throw new Error('HTTP '+res.status);
-            const data=await res.json();
-            if(!data.roomId)throw new Error('no roomId in response');
-            localStorage.setItem('minesweeper_room_'+data.roomId,data.playerId);
-            window.location.search='?room='+data.roomId;
+            joinRoom(await createRoom(activeSeed,hints));
         }catch(e){
             console.error(e);
             showStatus('Room creation failed — is php/ served?');
         }
-    },[activeSeed,hints,showStatus]);
+    },[activeSeed,hints,showStatus,createRoom,joinRoom]);
     // Name of whoever caused the current game-over (looked up by matching the short
     // owner tag against the first 8 hex of each player's full id).
     const mpKillerName=useMemo(()=>{
@@ -841,6 +858,15 @@ function App(){
 
     return(
         <div className="flex flex-col items-center" style={{width:'100vw',height:'100vh'}}>
+            {showStart&&<StartModal
+                hints={hints} setHints={setHints}
+                initialSeed={seedStr}
+                initialName={mpName}
+                onStartSingle={s=>{applySeed(s);setShowStart(false)}}
+                onCreateSession={(name,seed)=>{localStorage.setItem('minesweeper_name',name);setMpName(name);return createRoom(seed,hints)}}
+                onJoinSession={joinRoom}
+                onCopyLink={copyLink}
+            />}
             {mpNamePromptOpen&&<NamePromptModal
                 initial={mpName}
                 onSubmit={n=>{localStorage.setItem('minesweeper_name',n);setMpName(n);setMpNamePromptOpen(false)}}

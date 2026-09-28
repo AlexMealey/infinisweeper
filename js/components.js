@@ -15,31 +15,48 @@ window.Cell=memo(({x,y,state,go,hl,cr,pulse,sz,onR,onF,onH,onL})=>{
     return<div className={cn} style={st} onClick={e=>{e.preventDefault();if(!go)onR(x,y)}} onContextMenu={e=>{e.preventDefault();if(!go)onF(x,y)}} onMouseEnter={()=>onH(x,y)} onMouseLeave={onL}>{ct}</div>;
 });
 
+// Checkbox, radio and indented sub-group rows shared by the settings and start menus.
+const Chk=({label,checked,onChange,dim})=>(
+    <label style={{display:'flex',alignItems:'center',gap:6,color:dim?'#aaa':'#ccc',fontSize:18,padding:'2px 0',cursor:'pointer',userSelect:'none'}}>
+        <input type="checkbox" style={{accentColor:'#6366f1',width:12,height:12,flexShrink:0}} checked={checked} onChange={onChange}/>
+        {label}
+    </label>
+);
+const Rad=({label,name,checked,onChange})=>(
+    <label style={{display:'flex',alignItems:'center',gap:6,color:'#999',fontSize:12,padding:'1px 0',cursor:'pointer',userSelect:'none'}}>
+        <input type="radio" name={name} style={{accentColor:'#6366f1',width:11,height:11,flexShrink:0}} checked={checked} onChange={onChange}/>
+        {label}
+    </label>
+);
+const Sub=({children})=>(
+    <div style={{marginLeft:18,paddingLeft:8,borderLeft:'2px solid #2a2a4a',marginTop:1,marginBottom:2}}>{children}</div>
+);
+
+// Gameplay hints. A new room takes these as its shared hints, so the start menu offers them too.
+window.HintOptions=function HintOptions({hints,setHints}){
+    return(<div>
+        <Chk label="Show wrong flags on death" checked={hints.wrongFlags} onChange={e=>setHints(h=>({...h,wrongFlags:e.target.checked}))}/>
+        <Chk label="Highlight remaining cells on hover" checked={hints.pulseNeighbors} onChange={e=>setHints(h=>({...h,pulseNeighbors:e.target.checked}))}/>
+        <Chk label="Right-click number to auto-flag mines" checked={hints.chordFlag} onChange={e=>setHints(h=>({...h,chordFlag:e.target.checked}))}/>
+        <Chk label="Enable undo" checked={hints.undoEnabled} onChange={e=>setHints(h=>({...h,undoEnabled:e.target.checked}))}/>
+        {hints.undoEnabled&&<Sub>
+            <Rad label="Infinite undo" name="undoMode" checked={hints.undoMode==='infinite'} onChange={()=>setHints(h=>({...h,undoMode:'infinite'}))}/>
+            <Rad label="1 free / 1000 cleared" name="undoMode" checked={hints.undoMode==='refill'||(hints.undoMode!=='infinite'&&hints.undoMode!=='stack')} onChange={()=>setHints(h=>({...h,undoMode:'refill'}))}/>
+            <Rad label="Stacking +1 / 1000 cleared" name="undoMode" checked={hints.undoMode==='stack'} onChange={()=>setHints(h=>({...h,undoMode:'stack'}))}/>
+        </Sub>}
+    </div>);
+};
+
 window.SettingsModal=function SettingsModal({hints,setHints,uiSettings,setUiSettings,viewMode,changeView,cellSize,setCellSize,onClose}){
     useEffect(()=>{
         const h=e=>{if(e.key==='Escape')onClose()};
         document.addEventListener('keydown',h);return()=>document.removeEventListener('keydown',h);
     },[onClose]);
-    const Chk=({label,checked,onChange,dim})=>(
-        <label style={{display:'flex',alignItems:'center',gap:6,color:dim?'#aaa':'#ccc',fontSize:18,padding:'2px 0',cursor:'pointer',userSelect:'none'}}>
-            <input type="checkbox" style={{accentColor:'#6366f1',width:12,height:12,flexShrink:0}} checked={checked} onChange={onChange}/>
-            {label}
-        </label>
-    );
-    const Rad=({label,name,checked,onChange})=>(
-        <label style={{display:'flex',alignItems:'center',gap:6,color:'#999',fontSize:12,padding:'1px 0',cursor:'pointer',userSelect:'none'}}>
-            <input type="radio" name={name} style={{accentColor:'#6366f1',width:11,height:11,flexShrink:0}} checked={checked} onChange={onChange}/>
-            {label}
-        </label>
-    );
     const Sec=({children})=>(
         <div style={{marginTop:10,marginBottom:4}}>
             <div style={{color:'#8b8ba8',fontSize:12,fontWeight:700,letterSpacing:'0.09em',textTransform:'uppercase',marginBottom:4}}>{children}</div>
             <div style={{height:1,background:'#2a2a4a'}}/>
         </div>
-    );
-    const Sub=({children})=>(
-        <div style={{marginLeft:18,paddingLeft:8,borderLeft:'2px solid #2a2a4a',marginTop:1,marginBottom:2}}>{children}</div>
     );
     const Sm=({onClick,ch})=>(
         <button className="hb" style={{padding:'0 5px',fontSize:12,lineHeight:'18px',minWidth:20}} onClick={onClick}>{ch}</button>
@@ -77,15 +94,7 @@ window.SettingsModal=function SettingsModal({hints,setHints,uiSettings,setUiSett
                 </Sub>}
 
                 <Sec>Hints</Sec>
-                <Chk label="Show wrong flags on death" checked={hints.wrongFlags} onChange={e=>setHints(h=>({...h,wrongFlags:e.target.checked}))}/>
-                <Chk label="Highlight remaining cells on hover" checked={hints.pulseNeighbors} onChange={e=>setHints(h=>({...h,pulseNeighbors:e.target.checked}))}/>
-                <Chk label="Right-click number to auto-flag mines" checked={hints.chordFlag} onChange={e=>setHints(h=>({...h,chordFlag:e.target.checked}))}/>
-                <Chk label="Enable undo" checked={hints.undoEnabled} onChange={e=>setHints(h=>({...h,undoEnabled:e.target.checked}))}/>
-                {hints.undoEnabled&&<Sub>
-                    <Rad label="Infinite undo" name="undoMode" checked={hints.undoMode==='infinite'} onChange={()=>setHints(h=>({...h,undoMode:'infinite'}))}/>
-                    <Rad label="1 free / 1000 cleared" name="undoMode" checked={hints.undoMode==='refill'||(hints.undoMode!=='infinite'&&hints.undoMode!=='stack')} onChange={()=>setHints(h=>({...h,undoMode:'refill'}))}/>
-                    <Rad label="Stacking +1 / 1000 cleared" name="undoMode" checked={hints.undoMode==='stack'} onChange={()=>setHints(h=>({...h,undoMode:'stack'}))}/>
-                </Sub>}
+                <HintOptions hints={hints} setHints={setHints}/>
 
                 <Sec>Defaults</Sec>
                 <div style={{display:'flex',alignItems:'center',gap:8,padding:'2px 0'}}>
@@ -196,6 +205,100 @@ window.GameOverModal=function GameOverModal({undoAvailable,undoInfinite,undoStac
             <LeaderboardList entries={leaderboard} highlight={lastEntryDate}/>
         </div>
     </div>);
+};
+
+// Pulls a room id out of whatever was pasted: a bare code, a full invite link, or "?room=…".
+const parseSessionCode=raw=>{
+    let s=(raw||'').trim();
+    try{const r=new URL(s).searchParams.get('room');if(r)s=r}catch(e){}
+    const m=s.match(/room=([^&#\s]+)/i);if(m)s=m[1];
+    s=s.toLowerCase();
+    return/^[a-f0-9]{16,64}$/.test(s)?s:null;
+};
+
+// First-visit menu, shown when there's no saved game to restore. Singleplayer starts a board here;
+// Multiplayer creates a session (then hands out its invite link) or joins one by code or link.
+window.StartModal=function StartModal({hints,setHints,initialSeed,initialName,onStartSingle,onCreateSession,onJoinSession,onCopyLink}){
+    const[step,setStep]=useState('choose'); // choose → single, or choose → multi → create → created
+    const[seed,setSeed]=useState(initialSeed||rndSeed());
+    const[name,setName]=useState(initialName||'');
+    const[code,setCode]=useState('');
+    const[error,setError]=useState('');
+    const[busy,setBusy]=useState(false);
+    const[roomId,setRoomId]=useState(null);
+    const[copied,setCopied]=useState(false);
+    const go=s=>{setError('');setStep(s)};
+    const cleanName=name.trim().slice(0,24);
+    const create=async()=>{
+        if(!cleanName||busy)return;
+        setBusy(true);setError('');
+        try{setRoomId(await onCreateSession(cleanName,seed.trim()));setStep('created')}
+        catch(e){console.error(e);setError("Couldn't create a session. Is the server running?")}
+        finally{setBusy(false)}
+    };
+    const join=()=>{
+        const id=parseSessionCode(code);
+        if(id)onJoinSession(id);else setError("That doesn't look like a session code or invite link.");
+    };
+    const link=roomId?`${location.origin}${location.pathname}?room=${roomId}`:'';
+    const copy=async()=>{if(await onCopyLink(link)){setCopied(true);setTimeout(()=>setCopied(false),1400)}};
+    const seedRow=(
+        <div className="start-field">
+            <label htmlFor="start-seed" className="start-label">Seed</label>
+            <div className="start-row">
+                <input id="start-seed" className="hi" value={seed} onChange={e=>setSeed(e.target.value)} placeholder="Random"/>
+                <button className="start-icon" onClick={()=>setSeed(rndSeed())} title="Random seed" aria-label="Random seed">🎲</button>
+            </div>
+        </div>
+    );
+    const hintsBlock=<div className="start-field"><span className="start-label">Hints</span><HintOptions hints={hints} setHints={setHints}/></div>;
+    const back=to=><div className="close-row"><button className="close-btn" onClick={()=>go(to)}>← Back</button></div>;
+    return(
+        <div className="modal-overlay">
+            <div className="modal-panel start-panel">
+                <h2>💣 Infinite Minesweeper</h2>
+                {step==='choose'&&<>
+                    <button className="primary start-choice" onClick={()=>go('single')}>👤 Singleplayer</button>
+                    <button className="start-choice" onClick={()=>go('multi')}>👥 Multiplayer</button>
+                </>}
+                {step==='single'&&<>
+                    {hintsBlock}
+                    {seedRow}
+                    <button className="primary" onClick={()=>onStartSingle(seed)}>▶ Start game</button>
+                    {back('choose')}
+                </>}
+                {step==='multi'&&<>
+                    <button className="primary start-choice" onClick={()=>go('create')}>➕ Create a session</button>
+                    <div className="start-field">
+                        <label htmlFor="start-code" className="start-label">Enter session code</label>
+                        <div className="start-row">
+                            <input id="start-code" className="hi" value={code} onChange={e=>{setCode(e.target.value);setError('')}} onKeyDown={e=>{if(e.key==='Enter')join()}} placeholder="Code or invite link"/>
+                            <button onClick={join} disabled={!code.trim()}>Join</button>
+                        </div>
+                    </div>
+                    {error&&<div className="start-error">{error}</div>}
+                    {back('choose')}
+                </>}
+                {step==='create'&&<>
+                    <div className="start-field">
+                        <label htmlFor="start-name" className="start-label">Your name</label>
+                        <input id="start-name" className="hi" autoFocus maxLength={24} value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')create()}} placeholder="So others can see who's who"/>
+                    </div>
+                    {hintsBlock}
+                    {seedRow}
+                    <button className="primary" onClick={create} disabled={!cleanName||busy}>{busy?'Creating…':'Create session'}</button>
+                    {error&&<div className="start-error">{error}</div>}
+                    {back('multi')}
+                </>}
+                {step==='created'&&<>
+                    <div className="sub">Session ready. Send the link to whoever you're playing with.</div>
+                    <input className="hi" readOnly value={link} onFocus={e=>e.target.select()} aria-label="Invite link"/>
+                    <button onClick={copy}>{copied?'✓ Copied':'🔗 Copy link'}</button>
+                    <button className="primary" onClick={()=>onJoinSession(roomId)}>▶ Start playing</button>
+                </>}
+            </div>
+        </div>
+    );
 };
 
 // ---------------------------------------------------------------------------
