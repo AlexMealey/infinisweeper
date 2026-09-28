@@ -1,0 +1,5 @@
+# Runtime multiplayer room saves (bind-mounted into the container)
+data/rooms/*.json
+
+# Local compose overrides, e.g. PORT=9000
+.env

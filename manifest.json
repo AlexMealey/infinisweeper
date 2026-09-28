@@ -1,0 +1,12 @@
+{
+  "name": "Infinite Minesweeper",
+  "short_name": "InfiniSweeper",
+  "description": "An infinite procedurally generated minesweeper",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#080816",
+  "theme_color": "#111128",
+  "icons": [
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

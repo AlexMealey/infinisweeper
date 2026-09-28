@@ -1,0 +1,2 @@
+# Block direct HTTP access to room JSON files; only the PHP scripts should read them.
+Require all denied

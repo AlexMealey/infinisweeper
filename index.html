@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="theme-color" content="#111128"/>
+  <title>Infinite Minesweeper</title>
+  <link rel="manifest" href="manifest.json"/>
+  <link rel="apple-touch-icon" href="icons/icon.svg"/>
+
+  <!-- React: CDN first, local fallback -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script>window.React||document.write('<scr'+'ipt src="lib/react.production.min.js"><\/scr'+'ipt>')</script>
+
+  <!-- ReactDOM: CDN first, local fallback -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script>window.ReactDOM||document.write('<scr'+'ipt src="lib/react-dom.production.min.js"><\/scr'+'ipt>')</script>
+
+  <!-- Babel: CDN first, local fallback -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <script>window.Babel||document.write('<scr'+'ipt src="lib/babel.min.js"><\/scr'+'ipt>')</script>
+
+  <!-- mp4-muxer: CDN first, local fallback -->
+  <script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.js"></script>
+  <script>window.Mp4Muxer||document.write('<scr'+'ipt src="lib/mp4-muxer.js"><\/scr'+'ipt>')</script>
+
+  <!-- Tailwind CSS: CDN first, onerror fallback to local -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css"
+        onerror="this.onerror=null;this.href='lib/tailwind.min.css'"/>
+  <link rel="stylesheet" href="css/style.css"/>
+
+  <!-- Game logic (no JSX, synchronous) -->
+  <script src="js/game.js"></script>
+  <!-- Multiplayer transport (regular JS, exposes window.Net) -->
+  <script src="js/net.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- React components and app (JSX, processed by Babel at runtime) -->
+<script type="text/babel" src="js/components.js"></script>
+<script type="text/babel" src="js/app.js"></script>
+
+<script>
+  // Register service worker for PWA/offline support
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function() {
+      navigator.serviceWorker.register('./sw.js')
+        .catch(function(err) { console.warn('SW registration failed:', err); });
+    });
+  }
+</script>
+</body>
+</html>

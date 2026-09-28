@@ -1,0 +1,11 @@
+services:
+  infinisweeper:
+    build: .
+    image: infinisweeper:latest
+    container_name: infinisweeper
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:80"
+    volumes:
+      # Multiplayer room saves live on the host in ./data/rooms
+      - ./data/rooms:/var/www/html/data/rooms
