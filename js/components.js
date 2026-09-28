@@ -298,7 +298,7 @@ window.MultiplayerBadge=function MultiplayerBadge({status,backoff,onCopyInvite,o
     const[copied,setCopied]=useState(false);
     const state=typeof status==='string'?status:(status&&status.state)||'connecting';
     const dot=state==='connected'?'#10b981':state==='disconnected'?'#ef4444':'#f59e0b';
-    const copy=()=>{onCopyInvite();setCopied(true);setTimeout(()=>setCopied(false),1400)};
+    const copy=async()=>{if(await onCopyInvite()){setCopied(true);setTimeout(()=>setCopied(false),1400)}};
     // Countdown ticker so the reconnect message doesn't just say "reconnecting…" forever.
     const[secLeft,setSecLeft]=useState(0);
     useEffect(()=>{

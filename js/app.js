@@ -347,10 +347,12 @@ function App(){
         if(!mpRoomId){setMpPlayerId(null);return}
         const key='minesweeper_room_'+mpRoomId;
         let pid=localStorage.getItem(key);
-        if(!pid){
+        // Same rule as the server's valid_id(). Also replaces non-hex ids stored by older builds,
+        // which the server rejects with 400 forever.
+        if(!pid||!/^[a-f0-9]{16,64}$/.test(pid)){
             // 16 hex chars is enough — server tags moves with the first 8 for attribution.
-            const raw=(crypto&&crypto.randomUUID)?crypto.randomUUID().replace(/-/g,''):(Math.random().toString(36).slice(2)+Date.now().toString(36));
-            pid=raw.slice(0,16);
+            // getRandomValues, not randomUUID: randomUUID only exists on HTTPS/localhost.
+            pid=Array.from(crypto.getRandomValues(new Uint8Array(8)),b=>b.toString(16).padStart(2,'0')).join('');
             localStorage.setItem(key,pid);
         }
         setMpPlayerId(pid);
@@ -680,9 +682,26 @@ function App(){
     const cStyle=isFS?{width:'100vw',height:'calc(100vh - 42px)'}:{width:VIEWS[viewMode]?.w||800,height:VIEWS[viewMode]?.h||600,borderRadius:8,border:'1px solid #2a2a4a',boxShadow:'0 4px 30px rgba(0,0,0,.5)'};
 
     // --- Multiplayer helpers used by header buttons ---
-    const handleCopyInvite=useCallback(()=>{
-        if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(window.location.href).catch(()=>{});}
-        showStatus('Invite link copied');
+    // Resolves true only if the link actually reached the clipboard.
+    const handleCopyInvite=useCallback(async()=>{
+        const url=window.location.href;
+        let ok=false;
+        if(navigator.clipboard&&navigator.clipboard.writeText){
+            try{await navigator.clipboard.writeText(url);ok=true}catch(e){}
+        }
+        // navigator.clipboard only exists on HTTPS/localhost — plain-HTTP deploys need the legacy path.
+        if(!ok){
+            const ta=document.createElement('textarea');
+            ta.value=url;ta.setAttribute('readonly','');
+            ta.style.cssText='position:fixed;top:0;left:0;opacity:0';
+            document.body.appendChild(ta);
+            ta.focus();ta.select();ta.setSelectionRange(0,url.length); // setSelectionRange for iOS Safari
+            try{ok=document.execCommand('copy')}catch(e){}
+            document.body.removeChild(ta);
+        }
+        if(ok)showStatus('Invite link copied');
+        else window.prompt('Copy this invite link:',url);
+        return ok;
     },[showStatus]);
     const handleLeaveRoom=useCallback(()=>{
         // Bounce back to the base URL — drops ?room, single-player takes over from there.
