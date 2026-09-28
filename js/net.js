@@ -13,7 +13,9 @@
 // latest cursor) and incoming (whatever the client is behind on). Server owns
 // canonical move ordering.
 (function(){
-    const POLL_INTERVAL_MS = 250;
+    const POLL_ACTIVE_MS = 200;  // 5 syncs/sec while anyone in the room is doing something
+    const POLL_IDLE_MS = 500;    // 2 syncs/sec once the room has been quiet for IDLE_AFTER_MS
+    const IDLE_AFTER_MS = 5000;
     const CURSOR_MIN_INTERVAL_MS = 100; // rate-limit outgoing cursor updates
     const BACKOFF_STEPS_MS = [500, 1500, 4000, 10000];
 
@@ -31,10 +33,41 @@
     let round = null;            // last-seen server round (bumps when the room starts over); null until first sync
     let pendingReset = null;     // start-over request to send next sync
     let pendingVote = null;      // our answer to an open start-over vote
+    let lastActivityAt = 0;      // last local input or remote change — picks the poll rate
+    let lastOthersSig = '';      // other players' cursor/view positions, to spot remote movement
+    let timerDueAt = 0;          // when the pending tick fires
     let lastCursorSent = 0;
     let errStreak = 0;
 
     function log(...a){ if (window.NET_DEBUG) console.log('[net]', ...a); }
+
+    function schedule(delay){
+        timerDueAt = Date.now() + delay;
+        timer = setTimeout(tick, delay);
+    }
+
+    function isIdle(){ return Date.now() - lastActivityAt >= IDLE_AFTER_MS; }
+
+    function markActive(){
+        const wasIdle = isIdle();
+        lastActivityAt = Date.now();
+        // Waking from idle: pull the pending slow tick forward so the first action goes out
+        // POLL_ACTIVE_MS after the last sync, not POLL_IDLE_MS. (Not during error backoff.)
+        if (wasIdle && running && timer && !inflight && errStreak === 0) {
+            const soonest = timerDueAt - POLL_IDLE_MS + POLL_ACTIVE_MS;
+            if (soonest < timerDueAt) { clearTimeout(timer); schedule(Math.max(0, soonest - Date.now())); }
+        }
+    }
+
+    function othersSig(players){
+        let s = '';
+        for (const pid in players || {}) {
+            if (pid === cfg.playerId) continue;
+            const p = players[pid] || {};
+            s += pid + ':' + (p.cursor ? p.cursor.x + ',' + p.cursor.y : '') + '|' + (p.view ? p.view.x + ',' + p.view.y : '') + ';';
+        }
+        return s;
+    }
 
     async function tick(){
         if (!running || inflight) return;
@@ -89,6 +122,11 @@
             if (typeof data.moveIndex === 'number') moveIndex = data.moveIndex;
             if (typeof data.logRevision === 'number') logRevision = data.logRevision;
             if (typeof data.round === 'number') round = data.round;
+            // Other players' activity keeps us at the fast rate too, so watching someone play stays smooth.
+            const sig = othersSig(data.players);
+            if (sig !== lastOthersSig || (data.newMoves && data.newMoves.length) || typeof data.moveLog === 'string'
+                    || (data.resetVote && data.resetVote.status === 'open')) markActive();
+            lastOthersSig = sig;
             if (cfg.onSync) cfg.onSync(data);
         } catch (err) {
             // Put unsent moves back at the head of the queue so nothing is dropped.
@@ -105,10 +143,10 @@
             inflight = false;
             if (running) {
                 const delay = errStreak === 0
-                    ? POLL_INTERVAL_MS
+                    ? (isIdle() ? POLL_IDLE_MS : POLL_ACTIVE_MS)
                     : BACKOFF_STEPS_MS[Math.min(errStreak - 1, BACKOFF_STEPS_MS.length - 1)];
                 if (errStreak > 0 && cfg.onBackoff) cfg.onBackoff({retryInMs: delay, errStreak});
-                timer = setTimeout(tick, delay);
+                schedule(delay);
             }
         }
     }
@@ -128,6 +166,8 @@
             round = null;
             pendingReset = null;
             pendingVote = null;
+            lastActivityAt = Date.now(); // start at the fast rate while the room loads in
+            lastOthersSig = '';
             errStreak = 0;
             // First tick fires immediately so the client gets initial state without a 300ms wait.
             tick();
@@ -141,15 +181,18 @@
             // entry: ['r'|'f'|'u', x, y]
             if (!running || !entry || entry.length < 3) return;
             outMoves.push(entry);
+            markActive();
         },
         sendCursor(x, y, cellSize){
             if (!running) return;
             pendingCursor = {x, y, cellSize};
+            markActive();
         },
         sendHints(hints){
             // Shared gameplay hints only — UI settings never round-trip through here.
             if (!running || !hints) return;
             pendingHints = hints;
+            markActive();
         },
         requestReset(kind, seed, needsVote, moveLog){
             // kind: 'restart' keeps the seed, 'new' switches to seed (server picks one if empty),
@@ -157,15 +200,18 @@
             // needsVote: there's progress at stake, so a non-founder's request goes to a room vote.
             if (!running) return;
             pendingReset = {kind, seed: seed || null, needsVote: !!needsVote, moveLog: kind === 'load' ? moveLog : undefined};
+            markActive();
         },
         vote(id, yes){
             if (!running) return;
             pendingVote = {id, yes: !!yes};
+            markActive();
         },
         setView(x, y){
             // Viewport center in world coords. Sent every tick so other players can "go to" us.
             if (!running) return;
             currentView = {x, y};
+            markActive();
         },
         updateName(name){
             if (cfg) cfg.name = name;
