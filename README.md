@@ -59,12 +59,36 @@ Browsers only enable the service worker (offline play, "Install app") on HTTPS o
 
 ## Update
 
-```sh
-git pull
-docker compose up -d --build
-```
+1. On your dev machine, commit and push the changes:
 
-Save files are not touched. Players pick up new front-end files once `CACHE_NAME` in `sw.js` has been bumped, because the service worker serves cached files first.
+   ```sh
+   git add -A
+   git commit -m "Describe the change"
+   git push
+   ```
+
+2. On the server, pull and rebuild:
+
+   ```sh
+   cd infinisweeper
+   git pull
+   docker compose up -d --build
+   ```
+
+   The site is down for a few seconds while the container restarts. Save files in `./data/rooms` are not touched.
+
+3. Check that it came back healthy:
+
+   ```sh
+   docker compose ps        # STATUS shows "healthy" after ~10 seconds
+   docker compose logs -f   # watch for errors, Ctrl+C to exit
+   ```
+
+4. Tell players to refresh the page.
+
+If you changed any front-end file (`index.html`, `css/`, `js/`), bump `CACHE_NAME` in `sw.js` before committing. The service worker serves cached files first, so without the bump, HTTPS players keep the old version.
+
+Each rebuild leaves an old image behind. Clear them now and then with `docker image prune -f`.
 
 ## Manage
 

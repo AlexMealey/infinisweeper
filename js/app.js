@@ -6,7 +6,16 @@ function App(){
     const[seedStr,setSeedStr]=useState(initS);
     const[activeSeed,setActiveSeed]=useState(initS);
     const[locked,setLocked]=useState(!!getURLSeed());
-    const[viewMode,setViewMode]=useState('Large');
+    // View size is a per-browser preference, kept apart from game saves so it survives refreshes
+    // in multiplayer rooms and on boards with no moves yet (neither writes minesweeper_save).
+    const[viewMode,setViewMode]=useState(()=>{
+        const ok=v=>v==='Fullscreen'||VIEWS.hasOwnProperty(v);
+        try{
+            const v=localStorage.getItem('minesweeper_view');if(ok(v))return v;
+            // Older builds only kept the view inside the game save.
+            const s=JSON.parse(localStorage.getItem('minesweeper_save')||'null');if(s&&ok(s.viewMode))return s.viewMode;
+        }catch(e){}
+        return'Large'});
     const[cellSize,setCellSize]=useState(ZDEF);
     const[viewX,setViewX]=useState(0);
     const[viewY,setViewY]=useState(0);
@@ -84,6 +93,7 @@ function App(){
 
     useEffect(()=>{try{localStorage.setItem('minesweeper_hints',JSON.stringify(hints))}catch(e){}},[hints]);
     useEffect(()=>{try{localStorage.setItem('minesweeper_ui',JSON.stringify(uiSettings))}catch(e){}},[uiSettings]);
+    useEffect(()=>{try{localStorage.setItem('minesweeper_view',viewMode)}catch(e){}},[viewMode]);
 
     const showStatus=useCallback(msg=>setStatus(msg),[]);
 
@@ -91,6 +101,7 @@ function App(){
         version:3,activeSeed,locked,viewMode,cellSize,viewX,viewY,hints,moveLog:encodeMoveLog(moveLogRef.current),timestamp:Date.now(),runId:runIdRef.current
     }),[activeSeed,locked,viewMode,cellSize,viewX,viewY,hints,cells,gameOver,moves,flags,firstClick]);
 
+    // Saves still carry viewMode, but it's ignored here — the minesweeper_view preference wins.
     const loadGameState=useCallback(data=>{
         if(!data)return false;
         if(data.version===3||data.version===2){
@@ -98,7 +109,7 @@ function App(){
                 ?decodeMoveLog(typeof data.moveLog==='string'?data.moveLog:'')
                 :(Array.isArray(data.moveLog)?data.moveLog.slice():[]);
             setActiveSeed(data.activeSeed);setSeedStr(data.activeSeed);setLocked(data.locked);
-            setViewMode(data.viewMode);setCellSize(data.cellSize);setViewX(data.viewX);setViewY(data.viewY);
+            setCellSize(data.cellSize);setViewX(data.viewX);setViewY(data.viewY);
             setHints(migrateHints(data.hints));
             runIdRef.current=data.runId||genRunId();
             moveLogRef.current=log;
@@ -114,7 +125,7 @@ function App(){
         }
         if(data.version===1){
             setActiveSeed(data.activeSeed);setSeedStr(data.activeSeed);setLocked(data.locked);
-            setViewMode(data.viewMode);setCellSize(data.cellSize);setViewX(data.viewX);setViewY(data.viewY);
+            setCellSize(data.cellSize);setViewX(data.viewX);setViewY(data.viewY);
             setCells(data.cells);setGameOver(data.gameOver);setMoves(data.moves);setFlags(data.flags);
             setFirstClick(data.firstClick);setHints(migrateHints(data.hints));
             runIdRef.current=data.runId||genRunId();
