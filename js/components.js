@@ -272,7 +272,8 @@ window.ToastStack=function ToastStack({toasts,vote,selfId,onVote}){
 window.ResetVoteToast=function ResetVoteToast({vote,selfId,onVote}){
     // Set once we've answered, so the buttons hide before the server echoes our vote back.
     const[answeredLocally,setAnsweredLocally]=useState(false);
-    const what=vote.kind==='new'?'start a new game with a new seed':'restart this board';
+    const what=vote.kind==='new'?'start a new game with a new seed'
+        :vote.kind==='load'?`load a save file (${vote.loadMoves} moves)`:'restart this board';
     const open=vote.status==='open';
     const answered=(vote.myVote!==null&&vote.myVote!==undefined)||answeredLocally;
     const answer=yes=>{setAnsweredLocally(true);onVote(vote.id,yes)};

@@ -10,7 +10,8 @@
 //                                            'u' is an undo request; server rewrites the last matching 'r' entry.
 //   hints: {...} | null   -- if present, merge into shared room hints (subset of allowed keys)
 //   round: int | null     -- last round the client saw; moves/reset from an older round are dropped
-//   reset: {kind: "restart"|"new", seed?, needsVote} | null  -- start over (see "Start over" below)
+//   reset: {kind: "restart"|"new"|"load", seed?, needsVote, moveLog?} | null  -- start over (see "Start over" below);
+//                                                  "load" replaces the board with a save file's seed + moveLog
 //   vote:  {id, yes} | null                                   -- answer to the open reset vote
 // }
 // Returns:
@@ -25,8 +26,8 @@
 //   seed,
 //   founderId,                                     -- playerId of the room creator
 //   round,                                         -- bumps every time the room starts over
-//   resetVote: {id, by, byName, kind, status, yes, no, total, needed, myVote, secondsLeft} | null,
-//   events: [ {seq, type: "undo"|"restart"|"new", by, byName}, ... ]  -- last few seconds only
+//   resetVote: {id, by, byName, kind, loadMoves, status, yes, no, total, needed, myVote, secondsLeft} | null,
+//   events: [ {seq, type: "undo"|"restart"|"new"|"load", by, byName}, ... ]  -- last few seconds only
 // }
 
 require __DIR__ . '/lib.php';
@@ -175,13 +176,23 @@ foreach ($moves as $m) {
 // The founder resets straight away. So does anyone whose client says nothing is at stake (no moves
 // yet, or a lost game with no undos left). Anyone else opens a vote that needs VOTE_PASS_PCT of the
 // players in the room; the requester's own vote counts as yes.
+// A loaded save's seed must survive sanitizing unchanged, or its moves would replay on a different
+// board. Bad loads are dropped, not rejected with a 4xx, which Net would retry forever.
+if ($resetReq !== null && ($resetReq['kind'] ?? '') === 'load') {
+    $rawSeed = $resetReq['seed'] ?? null;
+    if (!is_string($rawSeed) || $rawSeed === '' || sanitize_seed($rawSeed) !== $rawSeed
+            || !is_string($resetReq['moveLog'] ?? null) || !valid_move_log($resetReq['moveLog'])) {
+        $resetReq = null;
+    }
+}
 $voteBefore = $room['resetVote'] ?? null;
 if ($resetReq !== null) {
-    $kind      = ($resetReq['kind'] ?? '') === 'new' ? 'new' : 'restart';
+    $kind      = in_array($resetReq['kind'] ?? '', ['new', 'load'], true) ? $resetReq['kind'] : 'restart';
     $seed      = (isset($resetReq['seed']) && is_string($resetReq['seed'])) ? sanitize_seed($resetReq['seed']) : null;
+    $loadLog   = $kind === 'load' ? $resetReq['moveLog'] : '';
     $isFounder = isset($room['founderId']) && $room['founderId'] === $playerId;
     if ($isFounder || empty($resetReq['needsVote'])) {
-        reset_round($room, $moveLog, $moveOwners, $logRev, $kind, $seed);
+        reset_round($room, $moveLog, $moveOwners, $logRev, $kind, $seed, $loadLog, substr($playerId, 0, 8));
         add_event($room, $kind, $playerId, $name);
     } elseif (($voteBefore['status'] ?? null) !== 'open') {
         $room['resetVote'] = [
@@ -190,6 +201,7 @@ if ($resetReq !== null) {
             'byName'    => $name,
             'kind'      => $kind,
             'seed'      => $seed,
+            'moveLog'   => $loadLog,
             'votes'     => [$playerId => true],
             'createdAt' => time(),
             'status'    => 'open',
@@ -205,7 +217,8 @@ if ($voteReply !== null && ($room['resetVote']['status'] ?? null) === 'open'
 prune_stale_players($room);
 if (tally_reset_vote($room) === 'passed') {
     $passed = $room['resetVote'];
-    reset_round($room, $moveLog, $moveOwners, $logRev, $passed['kind'], $passed['seed']);
+    reset_round($room, $moveLog, $moveOwners, $logRev, $passed['kind'], $passed['seed'],
+                $passed['moveLog'] ?? '', substr((string)$passed['by'], 0, 8));
     $room['resetVote'] = $passed; // reset_round clears the vote; keep the result visible briefly
 }
 $stateChanged = $resetReq !== null || $voteReply !== null || ($room['resetVote'] ?? null) !== $voteBefore;

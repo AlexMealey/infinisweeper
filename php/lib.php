@@ -13,6 +13,7 @@ const VOTE_TTL_SEC     = 30;   // an unresolved start-over vote expires after th
 const VOTE_RESULT_SEC  = 4;    // resolved votes stay visible this long so every client can show the outcome
 const EVENT_KEEP       = 20;   // recent room events kept for clients to announce ("Alex used an undo")
 const EVENT_SHOW_SEC   = 10;   // only events this recent are sent; clients dedupe by seq
+const MAX_LOADED_LOG   = 2000000; // chars — cap on a save file's move log loaded into a room
 
 function data_dir(): string {
     $dir = __DIR__ . '/../data/rooms';
@@ -152,19 +153,27 @@ function prune_stale_players(array &$room): void {
     }
 }
 
-// Wipe the board for a fresh round ('restart' keeps the seed, 'new' switches to $seed or a random one).
+// Same compact form as the client's encodeMoveLog: "r5,3;f5,4;u6,3;". Possessive quantifier so
+// PCRE keeps no backtracking state on long logs.
+function valid_move_log(string $log): bool {
+    return strlen($log) <= MAX_LOADED_LOG && preg_match('/^(?:[rfu]-?\d{1,9},-?\d{1,9};)*+$/D', $log) === 1;
+}
+
+// Start a fresh round. 'restart' keeps the seed, 'new' switches to $seed (or a random one), and
+// 'load' switches to a save file's $seed and $loadLog, credited to $owner (a short playerId).
 // Works on sync.php's move-log locals, which it persists at the end of the request.
-function reset_round(array &$room, string &$moveLog, string &$moveOwners, int &$logRev, string $kind, ?string $seed): void {
-    if ($kind === 'new') $room['seed'] = ($seed !== null && $seed !== '') ? $seed : bin2hex(random_bytes(4));
-    $moveLog    = '';
-    $moveOwners = '';
-    $logRev++;                  // makes every client rebuild from the (now empty) full log
+function reset_round(array &$room, string &$moveLog, string &$moveOwners, int &$logRev, string $kind, ?string $seed,
+                     string $loadLog = '', string $owner = ''): void {
+    if ($kind === 'new' || $kind === 'load') $room['seed'] = ($seed !== null && $seed !== '') ? $seed : bin2hex(random_bytes(4));
+    $moveLog    = $kind === 'load' ? $loadLog : '';
+    $moveOwners = $kind === 'load' ? str_repeat($owner . ';', substr_count($loadLog, ';')) : '';
+    $logRev++;                  // makes every client rebuild from the new full log
     $room['round']     = (int)($room['round'] ?? 0) + 1;
     $room['resetVote'] = null;  // a reset settles any open vote
 }
 
 // Record something the other players should be told about, so the board doesn't just change under
-// them: 'undo', 'restart' or 'new'. Clients show each seq once.
+// them: 'undo', 'restart', 'new' or 'load'. Clients show each seq once.
 function add_event(array &$room, string $type, string $playerId, string $name): void {
     $seq = (int)($room['eventSeq'] ?? 0) + 1;
     $room['eventSeq'] = $seq;
@@ -228,6 +237,7 @@ function public_vote(array $room, string $playerId): ?array {
         'by'          => $v['by'],
         'byName'      => $v['byName'] ?? 'Player',
         'kind'        => $v['kind'],
+        'loadMoves'   => substr_count($v['moveLog'] ?? '', ';'), // size of the save, for 'load' votes
         'status'      => $v['status'],
         'yes'         => $yes,
         'no'          => $no,

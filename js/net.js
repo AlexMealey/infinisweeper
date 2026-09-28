@@ -5,7 +5,7 @@
 //   Net.start({roomId, playerId, name, onSync: ({newMoves, players, hints, seed}) => {...}})
 //   Net.sendMove(['r', 5, 3])   // called after a local move is applied
 //   Net.sendCursor(worldX, worldY, cellSize)  // called on mousemove
-//   Net.requestReset('restart'|'new', seed, needsVote)  // start over, or ask the room to
+//   Net.requestReset('restart'|'new'|'load', seed, needsVote, moveLog?)  // start over, or ask the room to
 //   Net.vote(voteId, yes)                     // answer an open start-over vote
 //   Net.stop()
 //
@@ -151,11 +151,12 @@
             if (!running || !hints) return;
             pendingHints = hints;
         },
-        requestReset(kind, seed, needsVote){
-            // kind: 'restart' keeps the seed, 'new' switches to seed (server picks one if empty).
+        requestReset(kind, seed, needsVote, moveLog){
+            // kind: 'restart' keeps the seed, 'new' switches to seed (server picks one if empty),
+            // 'load' replaces the board with a save file's seed + encoded moveLog.
             // needsVote: there's progress at stake, so a non-founder's request goes to a room vote.
             if (!running) return;
-            pendingReset = {kind, seed: seed || null, needsVote: !!needsVote};
+            pendingReset = {kind, seed: seed || null, needsVote: !!needsVote, moveLog: kind === 'load' ? moveLog : undefined};
         },
         vote(id, yes){
             if (!running) return;

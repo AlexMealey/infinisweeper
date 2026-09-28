@@ -174,6 +174,7 @@ function App(){
         const reader=new FileReader();
         reader.onload=ev=>{
             try{const data=JSON.parse(ev.target.result);
+                if(mpRoomId){importIntoRoom(data);return}
                 if(data.version===1||data.version===2||data.version===3){
                     if(moves>0&&!confirm('Overwrite current progress?'))return;
                     if(loadGameState(data)){
@@ -469,7 +470,7 @@ function App(){
                     for(const ev of data.events){
                         if(ev.seq>max)max=ev.seq;
                         if(seen===null||ev.seq<=seen||ev.by===mpPlayerId)continue;
-                        const msg={undo:'used an undo',restart:'restarted the board',new:'started a new game'}[ev.type];
+                        const msg={undo:'used an undo',restart:'restarted the board',new:'started a new game',load:'loaded a save file'}[ev.type];
                         if(msg)pushToast(`${ev.byName} ${msg}`);
                     }
                     mpEventSeqRef.current=max;
@@ -589,13 +590,14 @@ function App(){
         :(clearedAtLastUndo===null?0:Math.max(0,1000-(clearedCount-clearedAtLastUndo)));
 
     const mpIsFounder=!!(mpRoomId&&mpPlayerId&&mpFounderId===mpPlayerId);
-    // Restart ('restart', same seed) or start a new game ('new', seed defaults to random).
+    // Restart ('restart', same seed), start a new game ('new', seed defaults to random), or in a room,
+    // replace the board with a save file ('load', its seed + encoded moveLog).
     // Asks first when there's something to lose: a game in progress, or a lost game an undo could
     // still rescue. In a room the founder decides alone; anyone else's request goes to a vote
     // that needs 51% of the room (enforced server-side).
-    const startOver=(kind,seed)=>{
+    const startOver=(kind,seed,loadLog)=>{
         const atStake=moveLogRef.current.length>0&&(!gameOver||undoAvailable);
-        const act=kind==='new'?'start a new game with a new seed':'restart this board';
+        const act=kind==='new'?'start a new game with a new seed':kind==='load'?'replace the board with this save file':'restart this board';
         if(!mpRoomId){
             if(atStake&&!confirm(`Are you sure you want to ${act}? Your current progress will be lost.`))return;
             if(kind==='new')applySeed(seed||rndSeed());else restart();
@@ -606,8 +608,21 @@ function App(){
         if(atStake&&!confirm(needsVote
             ?`Start a vote to ${act}? At least 51% of the room must agree.`
             :`Are you sure you want to ${act} for everyone in the room? Current progress will be lost.`))return;
-        Net.requestReset(kind,kind==='new'?(seed||rndSeed()):null,needsVote);
+        Net.requestReset(kind,kind==='new'?(seed||rndSeed()):kind==='load'?seed:null,needsVote,loadLog);
         showStatus(needsVote?'Vote started — waiting for the room':'Starting over…');
+    };
+    // In a room a save file replaces the shared board (loading it locally would just be
+    // overwritten by the next sync). Older saves without a move log can't be replayed there.
+    const importIntoRoom=data=>{
+        const entries=data&&data.version===3?decodeMoveLog(typeof data.moveLog==='string'?data.moveLog:'')
+            :data&&data.version===2&&Array.isArray(data.moveLog)?data.moveLog:null;
+        if(!entries){showStatus('This save is too old to load into a room');return}
+        // Rooms only accept plain seeds; the server would change anything else, and the moves
+        // would then replay on a different board.
+        const seed=String(data.activeSeed||'');
+        if(!/^[A-Za-z0-9_-]{1,32}$/.test(seed)){showStatus("This save's seed can't be used in a room");return}
+        const clean=entries.filter(m=>Array.isArray(m)&&['r','f','u'].includes(m[0])&&Number.isInteger(m[1])&&Number.isInteger(m[2]));
+        startOver('load',seed,encodeMoveLog(clean));
     };
     const startOverTip=mpRoomId&&!mpIsFounder?'Mid-game, needs 51% of the room to agree':undefined;
 
