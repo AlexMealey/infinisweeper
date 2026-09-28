@@ -413,11 +413,22 @@ function App(){
             changed=true;
         }
         if(!changed)return;
-        const canonical=mpCanonicalMovesRef.current;
+        // Our clicks made while this sync was in flight aren't in the server's log yet. Lay them on
+        // top (the server appends them in this same order next sync) so our own moves never blink out.
+        const canonical=mpCanonicalMovesRef.current.slice();
+        const owners=mpMoveOwnersRef.current.slice();
+        for(const m of Net.pendingMoves()){
+            if(m[0]==='u'){
+                for(let i=canonical.length-1;i>=0;i--){
+                    const c=canonical[i];
+                    if(c[0]==='r'&&c[1]===m[1]&&c[2]===m[2]){canonical[i]=['u',m[1],m[2]];break}
+                }
+            }else{canonical.push([m[0],m[1],m[2]]);owners.push(m[3])}
+        }
         const out=replayMoveLog(seed,canonical,!!wrongFlags,null);
         curFlagsRef.current=out.finalFlags;
         timelapseRef.current=canonical.length?null:[];
-        moveLogRef.current=canonical.slice();
+        moveLogRef.current=canonical;
         setCells(out.cells);
         setMoves(out.moves);
         setFlags(out.flags);
@@ -430,7 +441,7 @@ function App(){
         if(out.gameOver){
             let idx=-1;
             for(let i=canonical.length-1;i>=0;i--){if(canonical[i][0]==='r'){idx=i;break}}
-            setMpGameOverBy(idx>=0?(mpMoveOwnersRef.current[idx]||''):'');
+            setMpGameOverBy(idx>=0?(owners[idx]||''):'');
         }else{
             setMpGameOverBy(null);
         }
@@ -664,14 +675,8 @@ function App(){
         // In a room, tell the server to rewrite that fatal 'r' entry as 'u'. The next
         // sync response will echo a full moveLog rebuild (logRevision bumps), which
         // reconciles across all clients. We still apply the change locally for zero-latency
-        // feedback — the sync-driven rebuild should produce the same state.
-        if(mpNetActiveRef.current){
-            Net.sendMove(['u',last[1],last[2]]);
-            if(mpCanonicalMovesRef.current.length){
-                const ci=mpCanonicalMovesRef.current.length-1;
-                mpCanonicalMovesRef.current[ci]=['u',last[1],last[2]];
-            }
-        }
+        // feedback; until the server has it, applyServerMoves lays the pending 'u' over its log.
+        if(mpNetActiveRef.current)Net.sendMove(['u',last[1],last[2]]);
         log[log.length-1]=['u',last[1],last[2]];
         const out=replayMoveLog(activeSeed,log,hints.wrongFlags,null);
         curFlagsRef.current=out.finalFlags;

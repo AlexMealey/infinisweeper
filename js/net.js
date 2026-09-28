@@ -3,7 +3,8 @@
 //
 // Usage from the React layer:
 //   Net.start({roomId, playerId, name, onSync: ({newMoves, players, hints, seed}) => {...}})
-//   Net.sendMove(['r', 5, 3])   // called after a local move is applied
+//   Net.sendMove(['r', 5, 3])   // called after a local move is applied; sent right away
+//   Net.pendingMoves()          // our moves the server hasn't taken yet
 //   Net.sendCursor(worldX, worldY, cellSize)  // called on mousemove
 //   Net.requestReset('restart'|'new'|'load', seed, needsVote, moveLog?)  // start over, or ask the room to
 //   Net.vote(voteId, yes)                     // answer an open start-over vote
@@ -11,11 +12,13 @@
 //
 // One sync request per tick carries both directions: outgoing (queued moves +
 // latest cursor) and incoming (whatever the client is behind on). Server owns
-// canonical move ordering.
+// canonical move ordering. Clicks (moves, votes, resets) don't wait for the next
+// poll: they go out straight away, or right after the request already in flight.
 (function(){
-    const POLL_ACTIVE_MS = 200;  // 5 syncs/sec while anyone in the room is doing something
+    const POLL_ACTIVE_MS = 250;  // 4 syncs/sec while anyone in the room is doing something
     const POLL_IDLE_MS = 500;    // 2 syncs/sec once the room has been quiet for IDLE_AFTER_MS
     const IDLE_AFTER_MS = 5000;
+    const MIN_SEND_GAP_MS = 100; // clicks closer together than this share a request (keeps under the server's rate limit)
     const CURSOR_MIN_INTERVAL_MS = 100; // rate-limit outgoing cursor updates
     const BACKOFF_STEPS_MS = [500, 1500, 4000, 10000];
 
@@ -36,6 +39,8 @@
     let lastActivityAt = 0;      // last local input or remote change — picks the poll rate
     let lastOthersSig = '';      // other players' cursor/view positions, to spot remote movement
     let timerDueAt = 0;          // when the pending tick fires
+    let lastSentAt = 0;          // when the last request went out
+    let flushWanted = false;     // a click came in mid-request: send again as soon as it returns
     let lastCursorSent = 0;
     let errStreak = 0;
 
@@ -59,6 +64,19 @@
         }
     }
 
+    function sendGap(){ return Math.max(0, lastSentAt + MIN_SEND_GAP_MS - Date.now()); }
+
+    // Send queued clicks now instead of at the next poll. Several calls in one event (a chord
+    // flag queues many moves) land in the same request. Error backoff is left alone.
+    function flushSoon(){
+        if (!running || errStreak > 0) return;
+        if (inflight) { flushWanted = true; return; }
+        const wait = sendGap();
+        if (timer && timerDueAt - Date.now() <= wait) return;
+        clearTimeout(timer);
+        schedule(wait);
+    }
+
     function othersSig(players){
         let s = '';
         for (const pid in players || {}) {
@@ -72,6 +90,8 @@
     async function tick(){
         if (!running || inflight) return;
         inflight = true;
+        lastSentAt = Date.now();
+        flushWanted = false;
         // Snapshot outgoing state so anything that arrives mid-request goes in the next tick.
         const moves = outMoves;
         outMoves = [];
@@ -142,9 +162,10 @@
         } finally {
             inflight = false;
             if (running) {
-                const delay = errStreak === 0
-                    ? (isIdle() ? POLL_IDLE_MS : POLL_ACTIVE_MS)
-                    : BACKOFF_STEPS_MS[Math.min(errStreak - 1, BACKOFF_STEPS_MS.length - 1)];
+                const delay = errStreak > 0
+                    ? BACKOFF_STEPS_MS[Math.min(errStreak - 1, BACKOFF_STEPS_MS.length - 1)]
+                    : flushWanted ? sendGap()
+                    : (isIdle() ? POLL_IDLE_MS : POLL_ACTIVE_MS);
                 if (errStreak > 0 && cfg.onBackoff) cfg.onBackoff({retryInMs: delay, errStreak});
                 schedule(delay);
             }
@@ -168,6 +189,7 @@
             pendingVote = null;
             lastActivityAt = Date.now(); // start at the fast rate while the room loads in
             lastOthersSig = '';
+            flushWanted = false;
             errStreak = 0;
             // First tick fires immediately so the client gets initial state without a 300ms wait.
             tick();
@@ -182,6 +204,14 @@
             if (!running || !entry || entry.length < 3) return;
             outMoves.push(entry);
             markActive();
+            flushSoon();
+        },
+        pendingMoves(){
+            // Our moves the server hasn't taken yet, with our owner id like the server's newMoves.
+            // The board lays these over the server's log so a sync never briefly undoes a click.
+            if (!running) return [];
+            const owner = cfg.playerId.slice(0, 8);
+            return outMoves.map(m => [m[0], m[1], m[2], owner]);
         },
         sendCursor(x, y, cellSize){
             if (!running) return;
@@ -193,6 +223,7 @@
             if (!running || !hints) return;
             pendingHints = hints;
             markActive();
+            flushSoon();
         },
         requestReset(kind, seed, needsVote, moveLog){
             // kind: 'restart' keeps the seed, 'new' switches to seed (server picks one if empty),
@@ -201,11 +232,13 @@
             if (!running) return;
             pendingReset = {kind, seed: seed || null, needsVote: !!needsVote, moveLog: kind === 'load' ? moveLog : undefined};
             markActive();
+            flushSoon();
         },
         vote(id, yes){
             if (!running) return;
             pendingVote = {id, yes: !!yes};
             markActive();
+            flushSoon();
         },
         setView(x, y){
             // Viewport center in world coords. Sent every tick so other players can "go to" us.
