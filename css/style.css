@@ -63,7 +63,11 @@ body{background:#080816;min-height:100vh;display:flex;flex-direction:column;alig
 .toast-sub{color:#8b8ba8;font-size:12px;margin-top:3px}
 .toast-actions{display:flex;gap:6px;margin-top:8px}
 @keyframes tslide{from{transform:translateX(16px);opacity:0}to{transform:none;opacity:1}}
-.start-panel{width:400px;min-width:0;max-height:90vh;overflow-y:auto}
+.start-panel{width:400px;min-width:0;max-height:90vh;overflow-y:auto;position:relative}
+.start-panel .start-x{position:absolute;top:8px;right:10px;background:transparent;border:0;color:#666;font-size:22px;line-height:1;padding:2px 6px}
+.start-panel button.start-x:hover:not(:disabled){background:transparent;border:0;color:#aaa}
+.start-grow{flex:1}
+.start-note{color:#8b8ba8;font-size:11px;margin:0 0 2px 17px}
 .start-panel button{text-align:center}
 .start-panel .start-choice{padding:14px 16px;font-size:16px}
 .start-panel .hi{width:100%;min-width:0;font-size:14px;padding:6px 8px}

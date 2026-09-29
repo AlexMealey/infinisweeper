@@ -22,9 +22,9 @@ const Chk=({label,checked,onChange,dim})=>(
         {label}
     </label>
 );
-const Rad=({label,name,checked,onChange})=>(
-    <label style={{display:'flex',alignItems:'center',gap:6,color:'#999',fontSize:12,padding:'1px 0',cursor:'pointer',userSelect:'none'}}>
-        <input type="radio" name={name} style={{accentColor:'#6366f1',width:11,height:11,flexShrink:0}} checked={checked} onChange={onChange}/>
+const Rad=({label,name,checked,onChange,disabled})=>(
+    <label style={{display:'flex',alignItems:'center',gap:6,color:'#999',fontSize:12,padding:'1px 0',cursor:disabled?'default':'pointer',userSelect:'none',opacity:disabled?.5:1}}>
+        <input type="radio" name={name} style={{accentColor:'#6366f1',width:11,height:11,flexShrink:0}} checked={checked} onChange={onChange} disabled={disabled}/>
         {label}
     </label>
 );
@@ -33,8 +33,9 @@ const Sub=({children})=>(
 );
 
 // Gameplay hints. A new room takes these as its shared hints, so the start menu offers them too.
+// A fragment, so the settings panel renders exactly as it did before this was shared.
 window.HintOptions=function HintOptions({hints,setHints}){
-    return(<div>
+    return(<>
         <Chk label="Show wrong flags on death" checked={hints.wrongFlags} onChange={e=>setHints(h=>({...h,wrongFlags:e.target.checked}))}/>
         <Chk label="Highlight remaining cells on hover" checked={hints.pulseNeighbors} onChange={e=>setHints(h=>({...h,pulseNeighbors:e.target.checked}))}/>
         <Chk label="Right-click number to auto-flag mines" checked={hints.chordFlag} onChange={e=>setHints(h=>({...h,chordFlag:e.target.checked}))}/>
@@ -44,7 +45,7 @@ window.HintOptions=function HintOptions({hints,setHints}){
             <Rad label="1 free / 1000 cleared" name="undoMode" checked={hints.undoMode==='refill'||(hints.undoMode!=='infinite'&&hints.undoMode!=='stack')} onChange={()=>setHints(h=>({...h,undoMode:'refill'}))}/>
             <Rad label="Stacking +1 / 1000 cleared" name="undoMode" checked={hints.undoMode==='stack'} onChange={()=>setHints(h=>({...h,undoMode:'stack'}))}/>
         </Sub>}
-    </div>);
+    </>);
 };
 
 window.SettingsModal=function SettingsModal({hints,setHints,uiSettings,setUiSettings,viewMode,changeView,cellSize,setCellSize,onClose}){
@@ -216,23 +217,34 @@ const parseSessionCode=raw=>{
     return/^[a-f0-9]{16,64}$/.test(s)?s:null;
 };
 
-// First-visit menu, shown when there's no saved game to restore. Singleplayer starts a board here;
-// Multiplayer creates a session (then hands out its invite link) or joins one by code or link.
-window.StartModal=function StartModal({hints,setHints,initialSeed,initialName,onStartSingle,onCreateSession,onJoinSession,onCopyLink}){
-    const[step,setStep]=useState('choose'); // choose → single, or choose → multi → create → created
+// The start menu: shown on a fresh visit (no saved game to restore), and from the header's Menu
+// button. Singleplayer starts a board; Multiplayer creates a session (optionally from the game
+// already on screen, then hands out its invite link) or joins one by code or link. Hints are a
+// draft until a game starts, so browsing the menu inside a room never changes the room's hints.
+// currentGame: {moves, seed, shareable} when a board is underway, else null.
+window.StartModal=function StartModal({initialStep,hints,initialSeed,initialName,currentGame,inRoom,onStartSingle,onCreateSession,onJoinSession,onCopyLink,onCurrent,onClose}){
+    const[step,setStep]=useState(initialStep||'choose'); // choose → single, or choose → multi → create → created
+    const[draftHints,setDraftHints]=useState(()=>({...hints}));
     const[seed,setSeed]=useState(initialSeed||rndSeed());
     const[name,setName]=useState(initialName||'');
+    const[fromCurrent,setFromCurrent]=useState(!!(currentGame&&currentGame.shareable));
     const[code,setCode]=useState('');
     const[error,setError]=useState('');
     const[busy,setBusy]=useState(false);
     const[roomId,setRoomId]=useState(null);
     const[copied,setCopied]=useState(false);
+    useEffect(()=>{
+        if(!onClose)return;
+        const h=e=>{if(e.key==='Escape')onClose()};
+        document.addEventListener('keydown',h);return()=>document.removeEventListener('keydown',h);
+    },[onClose]);
     const go=s=>{setError('');setStep(s)};
     const cleanName=name.trim().slice(0,24);
+    const useCurrent=fromCurrent&&!!currentGame&&currentGame.shareable;
     const create=async()=>{
         if(!cleanName||busy)return;
         setBusy(true);setError('');
-        try{setRoomId(await onCreateSession(cleanName,seed.trim()));setStep('created')}
+        try{setRoomId(await onCreateSession(cleanName,useCurrent?currentGame.seed:seed.trim(),draftHints,useCurrent));setStep('created')}
         catch(e){console.error(e);setError("Couldn't create a session. Is the server running?")}
         finally{setBusy(false)}
     };
@@ -251,20 +263,30 @@ window.StartModal=function StartModal({hints,setHints,initialSeed,initialName,on
             </div>
         </div>
     );
-    const hintsBlock=<div className="start-field"><span className="start-label">Hints</span><HintOptions hints={hints} setHints={setHints}/></div>;
+    const hintsBlock=<div className="start-field"><span className="start-label">Hints</span><div><HintOptions hints={draftHints} setHints={setDraftHints}/></div></div>;
     const back=to=><div className="close-row"><button className="close-btn" onClick={()=>go(to)}>← Back</button></div>;
+    const boardWord=inRoom?'board':'game';
     return(
-        <div className="modal-overlay">
-            <div className="modal-panel start-panel">
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-panel start-panel" onClick={e=>e.stopPropagation()}>
+                {onClose&&<button className="start-x" onClick={onClose} title="Close" aria-label="Close">×</button>}
                 <h2>💣 Infinite Minesweeper</h2>
                 {step==='choose'&&<>
                     <button className="primary start-choice" onClick={()=>go('single')}>👤 Singleplayer</button>
                     <button className="start-choice" onClick={()=>go('multi')}>👥 Multiplayer</button>
+                    {currentGame&&<div className="start-field">
+                        <span className="start-label">{inRoom?'This session':'Current game'}</span>
+                        <div className="start-row">
+                            <button className="start-grow" onClick={()=>onCurrent('restart')}>🔄 Restart {boardWord}</button>
+                            <button className="start-grow" onClick={()=>onCurrent('new')}>🎲 New seed</button>
+                        </div>
+                    </div>}
                 </>}
                 {step==='single'&&<>
+                    {inRoom&&<div className="sub">Leaves this session.</div>}
                     {hintsBlock}
                     {seedRow}
-                    <button className="primary" onClick={()=>onStartSingle(seed)}>▶ Start game</button>
+                    <button className="primary" onClick={()=>onStartSingle(seed,draftHints)}>▶ Start game</button>
                     {back('choose')}
                 </>}
                 {step==='multi'&&<>
@@ -284,8 +306,16 @@ window.StartModal=function StartModal({hints,setHints,initialSeed,initialName,on
                         <label htmlFor="start-name" className="start-label">Your name</label>
                         <input id="start-name" className="hi" autoFocus maxLength={24} value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')create()}} placeholder="So others can see who's who"/>
                     </div>
+                    {currentGame&&<div className="start-field">
+                        <span className="start-label">Start from</span>
+                        <div>
+                            <Rad label={`The current ${boardWord} (${currentGame.moves} move${currentGame.moves===1?'':'s'}, seed ${currentGame.seed})`} name="startFrom" checked={useCurrent} onChange={()=>setFromCurrent(true)} disabled={!currentGame.shareable}/>
+                            {!currentGame.shareable&&<div className="start-note">Unavailable: sessions only take seeds of letters, numbers, - and _ (up to 32).</div>}
+                            <Rad label="A new board" name="startFrom" checked={!useCurrent} onChange={()=>setFromCurrent(false)}/>
+                        </div>
+                    </div>}
                     {hintsBlock}
-                    {seedRow}
+                    {!useCurrent&&seedRow}
                     <button className="primary" onClick={create} disabled={!cleanName||busy}>{busy?'Creating…':'Create session'}</button>
                     {error&&<div className="start-error">{error}</div>}
                     {back('multi')}

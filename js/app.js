@@ -69,14 +69,16 @@ function App(){
     const mpSelfIdShort=useMemo(()=>mpPlayerId?mpPlayerId.slice(0,8):null,[mpPlayerId]);
     const[mpName,setMpName]=useState(()=>localStorage.getItem('minesweeper_name')||'');
     const[mpNamePromptOpen,setMpNamePromptOpen]=useState(!!mpRoomId&&!localStorage.getItem('minesweeper_name'));
-    // Start menu (singleplayer / multiplayer) on a fresh visit: not in a room, no saved game to restore.
-    const[showStart,setShowStart]=useState(()=>{
-        if(mpRoomId)return false;
+    // Start menu: {step, closable} or null. Opens by itself on a fresh visit (not in a room, no saved
+    // game to restore, no singleplayer start queued from a room), and from the header's Menu button.
+    const[startMenu,setStartMenu]=useState(()=>{
+        const fresh={step:'choose',closable:false};
+        if(mpRoomId||localStorage.getItem('minesweeper_pending_start'))return null;
         try{
             const s=JSON.parse(localStorage.getItem('minesweeper_save')||'null');
-            if(s&&(s.version===1?s.cells&&Object.keys(s.cells).length:s.moveLog&&s.moveLog.length))return false;
+            if(s&&(s.version===1?s.cells&&Object.keys(s.cells).length:s.moveLog&&s.moveLog.length))return null;
         }catch(e){}
-        return true});
+        return fresh});
     const[mpPlayers,setMpPlayers]=useState({});
     const[mpStatus,setMpStatus]=useState('connecting');
     // Canonical, server-ordered move log for this room. Rebuilt state comes from replaying this.
@@ -348,6 +350,15 @@ function App(){
     useEffect(()=>{
         // In multiplayer mode, initial state comes from sync.php, not localStorage.
         if(mpRoomId)return;
+        // A singleplayer game started from the menu inside a room, carried across the page load.
+        let pending=null;
+        try{pending=JSON.parse(localStorage.getItem('minesweeper_pending_start')||'null')}catch(e){}
+        if(pending){
+            localStorage.removeItem('minesweeper_pending_start');
+            if(pending.hints)setHints(migrateHints(pending.hints));
+            applySeed(typeof pending.seed==='string'?pending.seed:'');
+            return;
+        }
         const saved=localStorage.getItem('minesweeper_save');
         if(saved){try{const data=JSON.parse(saved);if(data&&(data.version===1||data.version===2||data.version===3)){if(loadGameState(data)){lastSave.current=saved;lastSaveSig.current=sigOfState(data);showStatus('Progress restored')}}}catch(e){}}
     },[loadGameState,showStatus,mpRoomId]);
@@ -648,7 +659,6 @@ function App(){
         const clean=entries.filter(m=>Array.isArray(m)&&['r','f','u'].includes(m[0])&&Number.isInteger(m[1])&&Number.isInteger(m[2]));
         startOver('load',seed,encodeMoveLog(clean));
     };
-    const startOverTip=mpRoomId&&!mpIsFounder?'Mid-game, needs 51% of the room to agree':undefined;
 
     useEffect(()=>{
         if(gameOver)setShowGameOverModal(true);
@@ -822,11 +832,12 @@ function App(){
         window.location.href=window.location.pathname;
     },[]);
     // Makes a room on the server and keeps our founder playerId for it. Resolves to the roomId.
-    const createRoom=useCallback(async(seed,roomHints)=>{
+    // moveLog (encoded) starts the room from an existing board instead of a blank one.
+    const createRoom=useCallback(async(seed,roomHints,moveLog)=>{
         const res=await fetch('./php/create-room.php',{
             method:'POST',
             headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({seed,hints:roomHints}),
+            body:JSON.stringify({seed,hints:roomHints,moveLog:moveLog||undefined}),
             cache:'no-store',
         });
         if(!res.ok)throw new Error('HTTP '+res.status);
@@ -836,15 +847,32 @@ function App(){
         return data.roomId;
     },[]);
     const joinRoom=useCallback(roomId=>{window.location.search='?room='+roomId},[]);
-    const handleCreateRoom=useCallback(async()=>{
-        try{
-            showStatus('Creating room…');
-            joinRoom(await createRoom(activeSeed,hints));
-        }catch(e){
-            console.error(e);
-            showStatus('Room creation failed — is php/ served?');
+
+    // --- Start menu actions ---
+    const openMenu=step=>setStartMenu({step,closable:true});
+    // The board already on screen, which a new session can start from. Only seeds that survive the
+    // server's sanitize_seed() unchanged can carry moves into a room.
+    const menuCurrentGame=moveLogRef.current.length
+        ?{moves:moveLogRef.current.length,seed:activeSeed,shareable:/^[A-Za-z0-9_-]{1,32}$/.test(activeSeed)}
+        :null;
+    const menuStartSingle=(seed,newHints)=>{
+        if(mpRoomId){
+            // Leaving the room reloads the page, so queue the new game for the other side of it.
+            if(localStorage.getItem('minesweeper_save')&&!confirm('Leave this session and start a new singleplayer game? Your saved singleplayer game will be replaced.'))return;
+            localStorage.setItem('minesweeper_pending_start',JSON.stringify({seed,hints:newHints}));
+            window.location.href=window.location.pathname;
+            return;
         }
-    },[activeSeed,hints,showStatus,createRoom,joinRoom]);
+        const atStake=moveLogRef.current.length>0&&(!gameOver||undoAvailable);
+        if(atStake&&!confirm('Start a new game? Your current progress will be lost.'))return;
+        setHints(newHints);
+        applySeed(seed);
+        setStartMenu(null);
+    };
+    const menuCreateSession=(name,seed,roomHints,fromCurrent)=>{
+        localStorage.setItem('minesweeper_name',name);setMpName(name);
+        return createRoom(seed,roomHints,fromCurrent?encodeMoveLog(moveLogRef.current):null);
+    };
     // Name of whoever caused the current game-over (looked up by matching the short
     // owner tag against the first 8 hex of each player's full id).
     const mpKillerName=useMemo(()=>{
@@ -858,14 +886,19 @@ function App(){
 
     return(
         <div className="flex flex-col items-center" style={{width:'100vw',height:'100vh'}}>
-            {showStart&&<StartModal
-                hints={hints} setHints={setHints}
-                initialSeed={seedStr}
+            {startMenu&&<StartModal
+                initialStep={startMenu.step}
+                hints={hints}
+                initialSeed={startMenu.closable?rndSeed():seedStr}
                 initialName={mpName}
-                onStartSingle={s=>{applySeed(s);setShowStart(false)}}
-                onCreateSession={(name,seed)=>{localStorage.setItem('minesweeper_name',name);setMpName(name);return createRoom(seed,hints)}}
+                currentGame={menuCurrentGame}
+                inRoom={!!mpRoomId}
+                onStartSingle={menuStartSingle}
+                onCreateSession={menuCreateSession}
                 onJoinSession={joinRoom}
                 onCopyLink={copyLink}
+                onCurrent={kind=>{setStartMenu(null);startOver(kind)}}
+                onClose={startMenu.closable?()=>setStartMenu(null):undefined}
             />}
             {mpNamePromptOpen&&<NamePromptModal
                 initial={mpName}
@@ -904,13 +937,12 @@ function App(){
                         <MultiplayerBadge status={mpStatus} backoff={mpBackoff} onCopyInvite={handleCopyInvite} onLeave={handleLeaveRoom}/>
                         <PlayerListDropdown players={mpPlayers} selfId={mpPlayerId} founderId={mpFounderId} onGoTo={handleGoToPlayer}/>
                     </>
-                    :<button className="hb" onClick={handleCreateRoom} title="Create a shared room and invite someone">👥 Play with a friend</button>}
+                    :<button className="hb" onClick={()=>openMenu('create')} title="Create a session from this game and invite someone">👥 Play with a friend</button>}
                 <div className="flex items-center gap-1">
                     {uiSettings.showSeed&&uiSettings.showSeedBox&&<input className="hi" value={seedStr} onChange={e=>setSeedStr(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')startOver('new',seedStr)}} placeholder="seed" disabled={!!mpRoomId}/>}
-                    <button onClick={()=>startOver('new')} className="hb pr" title={startOverTip}>New Seed</button>
+                    <button onClick={()=>openMenu('choose')} className="hb pr" title="New singleplayer or multiplayer game, restart, or new seed">☰ Menu</button>
                     {/* Undo stays reachable after closing the game-over popup to inspect the board. */}
                     {gameOver&&undoAvailable&&<button onClick={doUndo} className="hb pr" title="Undo the move that hit the mine">↩ Undo</button>}
-                    <button onClick={()=>startOver('restart')} className="hb pr" title={startOverTip}>{gameOver?'New Game':'Restart'}</button>
                     {uiSettings.showSeed&&uiSettings.showLockBtn&&<button className={`hb ${locked?'act':''}`} onClick={()=>setLocked(l=>!l)}>{locked?'🔒':'🔓'}</button>}
                 </div>
                 <GameDropdown onExport={handleExport} onImport={handleImport} onClear={clearSave} onExportImage={handleExportImage} onExportVideo={handleExportVideo} videoExporting={videoExporting}/>
