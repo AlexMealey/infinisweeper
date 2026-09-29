@@ -14,7 +14,7 @@ function App(){
             const v=localStorage.getItem('minesweeper_view');if(ok(v))return v;
             // Older builds only kept the view inside the game save.
             const s=JSON.parse(localStorage.getItem('minesweeper_save')||'null');if(s&&ok(s.viewMode))return s.viewMode;
-        }catch(e){}
+        }catch(e){console.error('Failed to read saved view mode',e)}
         return'Large'});
     const[cellSize,setCellSize]=useState(ZDEF);
     const[viewX,setViewX]=useState(0);
@@ -27,9 +27,9 @@ function App(){
     const[gridDims,setGridDims]=useState({cols:20,rows:15});
     const[containerSize,setContainerSize]=useState({w:800,h:600});
     const[firstClick,setFirstClick]=useState(null);
-    const[hints,setHints]=useState(()=>{try{const s=localStorage.getItem('minesweeper_hints');if(s)return migrateHints(JSON.parse(s))}catch(e){}return{wrongFlags:false,pulseNeighbors:false,undoEnabled:false,undoMode:'refill',chordFlag:false}});
+    const[hints,setHints]=useState(()=>{try{const s=localStorage.getItem('minesweeper_hints');if(s)return migrateHints(JSON.parse(s))}catch(e){console.error('Failed to read saved hints',e)}return{wrongFlags:false,pulseNeighbors:false,undoEnabled:false,undoMode:'refill',chordFlag:false}});
     const dfltUI={showArrows:true,showScores:true,showLeaderboard:true,showUndo:true,showZoom:true,showCoords:true,showSeed:true,showSeedBox:true,showLockBtn:true,defaultCellSize:ZDEF};
-    const[uiSettings,setUiSettings]=useState(()=>{try{const s=localStorage.getItem('minesweeper_ui');if(s)return{...dfltUI,...JSON.parse(s)}}catch(e){}return dfltUI});
+    const[uiSettings,setUiSettings]=useState(()=>{try{const s=localStorage.getItem('minesweeper_ui');if(s)return{...dfltUI,...JSON.parse(s)}}catch(e){console.error('Failed to read saved UI settings',e)}return dfltUI});
     const[showSettings,setShowSettings]=useState(false);
     const[status,setStatus]=useState('');
     const[videoExporting,setVideoExporting]=useState(false);
@@ -37,7 +37,7 @@ function App(){
     const[undoUsedCount,setUndoUsedCount]=useState(0);
     const[showGameOverModal,setShowGameOverModal]=useState(false);
     const[leaderboard,setLeaderboard]=useState(()=>{
-        try{const s=localStorage.getItem('minesweeper_leaderboard');const arr=s?JSON.parse(s):[];return Array.isArray(arr)?arr:[]}catch(e){return[]}
+        try{const s=localStorage.getItem('minesweeper_leaderboard');const arr=s?JSON.parse(s):[];return Array.isArray(arr)?arr:[]}catch(e){console.error('Failed to read saved leaderboard',e);return[]}
     });
     const[lastEntryDate,setLastEntryDate]=useState(null);
     const leaderboardRecordedRef=useRef(false);
@@ -77,7 +77,7 @@ function App(){
         try{
             const s=JSON.parse(localStorage.getItem('minesweeper_save')||'null');
             if(s&&(s.version===1?s.cells&&Object.keys(s.cells).length:s.moveLog&&s.moveLog.length))return null;
-        }catch(e){}
+        }catch(e){console.error('Failed to read saved game',e)}
         return fresh});
     const[mpPlayers,setMpPlayers]=useState({});
     const[mpStatus,setMpStatus]=useState('connecting');
@@ -117,9 +117,9 @@ function App(){
         return ml+'|'+s.activeSeed+'|'+s.locked+'|'+s.viewMode+'|'+s.cellSize+'|'+s.viewX+'|'+s.viewY+'|'+JSON.stringify(s.hints);
     };
 
-    useEffect(()=>{try{localStorage.setItem('minesweeper_hints',JSON.stringify(hints))}catch(e){}},[hints]);
-    useEffect(()=>{try{localStorage.setItem('minesweeper_ui',JSON.stringify(uiSettings))}catch(e){}},[uiSettings]);
-    useEffect(()=>{try{localStorage.setItem('minesweeper_view',viewMode)}catch(e){}},[viewMode]);
+    useEffect(()=>{try{localStorage.setItem('minesweeper_hints',JSON.stringify(hints))}catch(e){console.error('Failed to save hints',e)}},[hints]);
+    useEffect(()=>{try{localStorage.setItem('minesweeper_ui',JSON.stringify(uiSettings))}catch(e){console.error('Failed to save UI settings',e)}},[uiSettings]);
+    useEffect(()=>{try{localStorage.setItem('minesweeper_view',viewMode)}catch(e){console.error('Failed to save view mode',e)}},[viewMode]);
 
     const showStatus=useCallback(msg=>setStatus(msg),[]);
 
@@ -193,7 +193,8 @@ function App(){
                         showStatus('Save file loaded successfully');
                     }else showStatus('Invalid save file')}
                 else showStatus('Incompatible save version')}
-            catch(err){showStatus('Invalid save file')}};
+            catch(err){console.error('Failed to import save file',err);showStatus('Invalid save file')}};
+        reader.onerror=()=>{console.error('Failed to read save file',reader.error);showStatus('Could not read file')};
         reader.readAsText(file);e.target.value=''};
 
     const clearSave=()=>{localStorage.removeItem('minesweeper_save');lastSave.current='';lastSaveSig.current='';showStatus('Cache cleared')};
@@ -275,7 +276,7 @@ function App(){
             let chosen=null;
             for(const c of codecCandidates){
                 try{const support=await VideoEncoder.isConfigSupported({codec:c.codec,width:canvasW,height:canvasH});
-                    if(support&&support.supported){chosen=c;break}}catch(e){}}
+                    if(support&&support.supported){chosen=c;break}}catch(e){console.error('Codec support check failed for',c.codec,e)}}
             if(!chosen){showStatus('This device cannot encode H.264/H.265 video');setVideoExporting(false);return}
 
             const canvas=document.createElement('canvas');canvas.width=canvasW;canvas.height=canvasH;
@@ -352,7 +353,7 @@ function App(){
         if(mpRoomId)return;
         // A singleplayer game started from the menu inside a room, carried across the page load.
         let pending=null;
-        try{pending=JSON.parse(localStorage.getItem('minesweeper_pending_start')||'null')}catch(e){}
+        try{pending=JSON.parse(localStorage.getItem('minesweeper_pending_start')||'null')}catch(e){console.error('Failed to read pending start',e)}
         if(pending){
             localStorage.removeItem('minesweeper_pending_start');
             if(pending.hints)setHints(migrateHints(pending.hints));
@@ -360,7 +361,7 @@ function App(){
             return;
         }
         const saved=localStorage.getItem('minesweeper_save');
-        if(saved){try{const data=JSON.parse(saved);if(data&&(data.version===1||data.version===2||data.version===3)){if(loadGameState(data)){lastSave.current=saved;lastSaveSig.current=sigOfState(data);showStatus('Progress restored')}}}catch(e){}}
+        if(saved){try{const data=JSON.parse(saved);if(data&&(data.version===1||data.version===2||data.version===3)){if(loadGameState(data)){lastSave.current=saved;lastSaveSig.current=sigOfState(data);showStatus('Progress restored')}}}catch(e){console.error('Failed to restore saved game',e)}}
     },[loadGameState,showStatus,mpRoomId]);
 
     useEffect(()=>{
@@ -516,7 +517,7 @@ function App(){
                 applyServerMoves(data.seed||activeSeed,data,data.hints&&data.hints.wrongFlags);
             },
             onError:e=>{
-                console.warn('sync error',e);
+                console.error('sync error',e);
                 // A mistyped session code, or a session that expired (rooms are deleted after a day idle).
                 if(e&&e.message==='HTTP 404')showStatus('Session not found. Check the code, or create a new session.');
             },
@@ -672,7 +673,7 @@ function App(){
         setLeaderboard(prev=>{
             const filtered=prev.filter(e=>e.runId!==entry.runId);
             const next=[...filtered,entry].sort((a,b)=>b.cleared-a.cleared||a.moves-b.moves).slice(0,8);
-            try{localStorage.setItem('minesweeper_leaderboard',JSON.stringify(next))}catch(e){}
+            try{localStorage.setItem('minesweeper_leaderboard',JSON.stringify(next))}catch(e){console.error('Failed to save leaderboard',e)}
             return next;
         });
     },[]);
@@ -810,7 +811,7 @@ function App(){
     const copyLink=useCallback(async url=>{
         let ok=false;
         if(navigator.clipboard&&navigator.clipboard.writeText){
-            try{await navigator.clipboard.writeText(url);ok=true}catch(e){}
+            try{await navigator.clipboard.writeText(url);ok=true}catch(e){console.error('Clipboard write failed',e)}
         }
         // navigator.clipboard only exists on HTTPS/localhost — plain-HTTP deploys need the legacy path.
         if(!ok){
@@ -819,7 +820,7 @@ function App(){
             ta.style.cssText='position:fixed;top:0;left:0;opacity:0';
             document.body.appendChild(ta);
             ta.focus();ta.select();ta.setSelectionRange(0,url.length); // setSelectionRange for iOS Safari
-            try{ok=document.execCommand('copy')}catch(e){}
+            try{ok=document.execCommand('copy')}catch(e){console.error('Legacy copy failed',e)}
             document.body.removeChild(ta);
         }
         if(ok)showStatus('Invite link copied');

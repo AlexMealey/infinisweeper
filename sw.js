@@ -1,4 +1,4 @@
-const CACHE_NAME = 'infinisweeper-v5';
+const CACHE_NAME = 'infinisweeper-v7';
 
 const CDN_TO_LOCAL = {
   'https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js': './lib/react.production.min.js',
@@ -29,6 +29,7 @@ const PRE_CACHE = [
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME).then(cache => cache.addAll(PRE_CACHE))
+      .catch(err => { console.error('SW pre-cache failed:', err); throw err; })
   );
   self.skipWaiting();
 });
@@ -61,17 +62,19 @@ self.addEventListener('fetch', event => {
         .then(response => {
           if (response.ok) {
             const clone = response.clone();
-            caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
+            caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone))
+              .catch(err => console.error('SW cache write failed:', url, err));
           }
           return response;
         })
-        .catch(() =>
-          caches.match(event.request).then(cached => {
+        .catch(err => {
+          console.error('SW CDN fetch failed, using cache:', url, err);
+          return caches.match(event.request).then(cached => {
             if (cached) return cached;
             // Fall back to local lib file
             return caches.match(new Request(CDN_TO_LOCAL[url]));
-          })
-        )
+          });
+        })
     );
   } else {
     // Cache-first for local files
@@ -81,7 +84,8 @@ self.addEventListener('fetch', event => {
         return fetch(event.request).then(response => {
           if (response.ok) {
             const clone = response.clone();
-            caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
+            caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone))
+              .catch(err => console.error('SW cache write failed:', url, err));
           }
           return response;
         });
