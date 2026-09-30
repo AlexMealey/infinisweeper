@@ -1,4 +1,4 @@
-const CACHE_NAME = 'infinisweeper-v8';
+const CACHE_NAME = 'infinisweeper-v9';
 
 const CDN_TO_LOCAL = {
   'https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js': './lib/react.production.min.js',
@@ -29,7 +29,8 @@ const PRE_CACHE = [
 
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => cache.addAll(PRE_CACHE))
+    // cache: 'reload' skips the HTTP cache, so a new sw.js never pre-caches stale copies next to fresh ones.
+    caches.open(CACHE_NAME).then(cache => cache.addAll(PRE_CACHE.map(u => new Request(u, { cache: 'reload' }))))
       .catch(err => { console.error('SW pre-cache failed:', err); throw err; })
   );
   self.skipWaiting();

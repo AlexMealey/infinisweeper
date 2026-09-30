@@ -110,8 +110,8 @@ window.SettingsModal=function SettingsModal({hints,setHints,uiSettings,setUiSett
                 <Sec>Export</Sec>
                 <div style={{display:'flex',alignItems:'center',gap:8,padding:'2px 0'}}>
                     <span style={{color:'#aaa',fontSize:12,minWidth:82}}>Image size</span>
-                    <select className="hs" value={uiSettings.exportRes} onChange={e=>setUiSettings(u=>({...u,exportRes:e.target.value}))}>
-                        {IMG_RES_OPTIONS.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+                    <select className="hs" value={uiSettings.exportRes||'auto'} onChange={e=>setUiSettings(u=>({...u,exportRes:e.target.value}))}>
+                        <option value="auto">Auto (under 10 MB)</option><option value="32">Full (32 px/cell)</option><option value="16">Half (16 px/cell)</option><option value="8">Quarter (8 px/cell)</option>
                     </select>
                 </div>
 
