@@ -75,15 +75,12 @@ window.drawCellToCanvas=function(ctx,st,dx,dy,sz){
     else{let g=ctx.createLinearGradient(dx,dy,dx+sz,dy+sz);g.addColorStop(0,'#38385a');g.addColorStop(1,'#2c2c4a');ctx.fillStyle=g;ctx.fillRect(dx,dy,sz,sz)}
     ctx.strokeRect(dx,dy,sz,sz)
 };
-// stamp (optional) is stacked under the move counter; callers from older builds leave it out.
-window.drawFooterHUD=function(ctx,canvasW,canvasH,footerH,move,total,cleared,flagged,stamp){
+window.drawFooterHUD=function(ctx,canvasW,canvasH,footerH,move,total,cleared,flagged){
     ctx.fillStyle='#111128';ctx.fillRect(0,canvasH-footerH,canvasW,footerH);
     ctx.strokeStyle='#2a2a4a';ctx.lineWidth=Math.max(1,Math.round(footerH/48));ctx.strokeRect(0,canvasH-footerH,canvasW,footerH);
     const fs=Math.round(footerH*0.3),emojiFs=Math.round(footerH*0.35);ctx.textBaseline='middle';
     const cy=canvasH-footerH/2;let ox=footerH*0.4;
     const draw=(label,icon,val)=>{ctx.textAlign='left';ctx.fillStyle='#aaa';ctx.font=`bold ${fs}px sans-serif`;ctx.fillText(label,ox,cy);ox+=ctx.measureText(label).width+footerH*0.1;ctx.font=`${emojiFs}px serif`;ctx.fillText(icon,ox,cy);ox+=footerH*0.45;ctx.fillStyle='#fff';ctx.font=`bold ${fs}px sans-serif`;const s=String(val);ctx.fillText(s,ox,cy);ox+=ctx.measureText(s).width+footerH*0.5};
     draw('Flagged:','🚩',flagged);draw('Moves:','👆',move);draw('Cleared:','🟦',cleared);
-    ctx.fillStyle='#888';ctx.textAlign='right';const rx=canvasW-footerH*0.4;
-    if(stamp){ctx.font=`bold ${Math.round(footerH*0.24)}px sans-serif`;ctx.fillText(`${move} / ${total}`,rx,cy-footerH*0.18);ctx.fillText(stamp,rx,cy+footerH*0.18)}
-    else{ctx.font=`bold ${fs}px sans-serif`;ctx.fillText(`${move} / ${total}`,rx,cy)}
+    ctx.fillStyle='#888';ctx.font=`bold ${fs}px sans-serif`;ctx.textAlign='right';ctx.fillText(`${move} / ${total}`,canvasW-footerH*0.4,cy)
 };

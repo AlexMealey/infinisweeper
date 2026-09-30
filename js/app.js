@@ -201,11 +201,10 @@ function App(){
 
     const clearSave=()=>{localStorage.removeItem('minesweeper_save');lastSave.current='';lastSaveSig.current='';showStatus('Cache cleared')};
 
-    // Local time the export was made, burned into image and video footers.
-    const exportStamp=()=>{const d=new Date(),p=n=>String(n).padStart(2,'0');return`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`};
+    // Date and time (UTC) for export file names.
     const exportFileDate=()=>new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
     // The original full-canvas export. Still used when mapimage.js didn't load, the browser lacks CompressionStream, or the streamed export fails.
-    const exportImageCanvas=(withStats,sz,stamp)=>{
+    const exportImageCanvas=(withStats,sz)=>{
         const keys=Object.keys(cells);
         let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
         keys.forEach(k=>{const[x,y]=k.split(',').map(Number);minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y)});
@@ -235,10 +234,6 @@ function App(){
             draw('Mines Flagged:','🚩',flags);
             draw('Moves Made:','👆',moves);
             draw('Squares Cleared:','🟦',`${clearedCount}`);
-            if(stamp){
-                const rx=canvasW-footerH*0.4;ctx.font=`bold ${fs}px sans-serif`;const k=Math.min(1,(rx-ox)/ctx.measureText(stamp).width);
-                if(k>=0.5){ctx.fillStyle='#888';ctx.font=`bold ${Math.floor(fs*k)}px sans-serif`;ctx.textAlign='right';ctx.fillText(stamp,rx,canvasH-footerH/2)}
-            }
         }
         const link=document.createElement('a');link.download=`${exportFileDate()}-minesweeper-seed-${activeSeed}-run.png`;
         link.href=canvas.toDataURL('image/png');link.click();showStatus('Progress image exported')};
@@ -261,14 +256,14 @@ function App(){
     const handleExportImage=async(withStats=true)=>{
         if(imageExportingRef.current)return;
         if(Object.keys(cells).length===0){showStatus('No progress to export');return}
-        const res=uiSettings.exportRes||'auto',stamp=exportStamp();
-        const canvasExport=()=>{try{exportImageCanvas(withStats,res==='auto'?32:Math.max(1,Math.min(32,parseInt(res,10)||32)),stamp)}
+        const res=uiSettings.exportRes||'auto';
+        const canvasExport=()=>{try{exportImageCanvas(withStats,res==='auto'?32:Math.max(1,Math.min(32,parseInt(res,10)||32)))}
             catch(err){console.error('Canvas image export failed',err);showStatus('Image export failed: '+(err&&err.message?err.message:'unknown error'))}};
         if(!window.MapImage||!window.CompressionStream){canvasExport();return}
         imageExportingRef.current=true;showStatus('Exporting image…');
         const ex=beginExportTask('image','Exporting image');
         try{
-            const stats=withStats?{flags,moves,cleared:clearedCount,stamp}:null;
+            const stats=withStats?{flags,moves,cleared:clearedCount}:null;
             const out=await MapImage.render(cells,stats,res,bytes=>confirm(`The exported image will be about ${Math.ceil(bytes/1e6)} MB. Continue?`),undefined,{signal:ex.signal,onProgress:ex.onProgress});
             if(!out){showStatus('Image export cancelled');return}
             const url=URL.createObjectURL(out.blob);
@@ -310,7 +305,7 @@ function App(){
     const VIDEO_CAP=50e6;
     // The original exporter, which draws on a canvas and holds the whole file in memory.
     // Still used when timelapse.js didn't load, or its streamed export fails.
-    const exportVideoInMemory=async(steps,stamp=exportStamp())=>{
+    const exportVideoInMemory=async steps=>{
         if(!steps.length){showStatus('No progress to export');return}
         if(typeof window.VideoEncoder==='undefined'||typeof window.VideoFrame==='undefined'||typeof window.Mp4Muxer==='undefined'){
             showStatus('Video export needs a browser with WebCodecs (try Chrome or Edge)');return}
@@ -325,20 +320,22 @@ function App(){
             const pad=2;minX-=pad;maxX+=pad;minY-=pad;maxY+=pad;
             const w=maxX-minX+1,h=maxY-minY+1;
 
-            const maxDim=1400;
-            let sz=24;
-            if(w*sz>maxDim||h*sz>maxDim)sz=Math.max(4,Math.floor(maxDim/Math.max(w,h)));
+            // Cells shrink (down to 1px) so the frame stays within maxDim; a 4px floor made big boards too large to encode.
+            const maxDim=1920;
+            const sz=Math.max(1,Math.min(24,Math.floor(maxDim/Math.max(w,h))));
             const footerH=Math.max(48,Math.round(h*sz*0.04/0.96));
             let canvasW=Math.max(480,w*sz), canvasH=Math.max(480,h*sz+footerH);
             if(canvasW%2)canvasW++;
             if(canvasH%2)canvasH++;
 
-            const codecCandidates=[
-                {type:'avc',codec:'avc1.4d0028'},{type:'avc',codec:'avc1.42001f'},{type:'avc',codec:'avc1.64001f'}
-            ];
+            // The smallest H.264 level (up to 5.1) that fits this frame size and rate. Fixed levels 4.0/3.1
+            // rejected big boards, which then reported that the device couldn't encode video at all.
+            const mbs=Math.ceil(canvasW/16)*Math.ceil(canvasH/16);
+            const level=([[30,1620,40500],[31,3600,108000],[32,5120,216000],[40,8192,245760],[42,8704,522240],[50,22080,589824],[51,36864,983040]].find(([,fs,mbps])=>mbs<=fs&&mbs*fps<=mbps)||[51])[0].toString(16);
+            const codecCandidates=['4d00','42e0','6400'].map(p=>({type:'avc',codec:`avc1.${p}${level}`}));
             let chosen=null;
             for(const c of codecCandidates){
-                try{const support=await VideoEncoder.isConfigSupported({codec:c.codec,width:canvasW,height:canvasH});
+                try{const support=await VideoEncoder.isConfigSupported({codec:c.codec,width:canvasW,height:canvasH,framerate:fps});
                     if(support&&support.supported){chosen=c;break}}catch(e){console.error('Codec support check failed for',c.codec,e)}}
             if(!chosen){showStatus('This device cannot encode H.264/H.265 video');setVideoExporting(false);return}
 
@@ -361,7 +358,7 @@ function App(){
                 videoEncoder.configure({codec:chosen.codec,width:canvasW,height:canvasH,bitrate,framerate:fps});
                 let frame=0,done=0,cleared=0,flagged=0;
                 const emit=async()=>{
-                    drawFooterHUD(ctx,canvasW,canvasH,footerH,done,steps.length,cleared,flagged,stamp);
+                    drawFooterHUD(ctx,canvasW,canvasH,footerH,done,steps.length,cleared,flagged);
                     const vf=new VideoFrame(canvas,{timestamp:frame*frameDurationUs,duration:frameDurationUs});
                     videoEncoder.encode(vf,{keyFrame:frame%(fps*10)===0}); // a keyframe every 10s: seekable, and half the size of every 2s
                     vf.close();frame++;
@@ -409,7 +406,7 @@ function App(){
             showStatus('Video export needs a browser with WebCodecs (try Chrome or Edge)');return}
         if(!window.Timelapse||!Mp4Muxer.StreamTarget){await exportVideoInMemory(legacyVideoSteps());return}
         setVideoExporting(true);showStatus('Preparing timelapse…');
-        const ex=beginExportTask('video','Exporting timelapse'),stamp=exportStamp();
+        const ex=beginExportTask('video','Exporting timelapse');
         let failed=null,wake=null;
         // Long exports run for minutes; stop the screen sleeping (and pausing the tab) meanwhile.
         try{if(navigator.wakeLock)wake=await navigator.wakeLock.request('screen')}catch(e){console.error('Screen wake lock unavailable',e)}
@@ -417,7 +414,7 @@ function App(){
             // In multiplayer moveLogRef is the room's full log from the server, with every player's moves.
             const src=v1Frames?{frames:v1Frames}:{seed:activeSeed,moveLog:moveLogRef.current.slice(),wrongFlags:!!hints.wrongFlags};
             // Over 4000 frames the modal first offers a faster speed; without it, fall back to a confirm().
-            const out=await Timelapse.render(src,{fps:uiSettings.tlFps,movesPerFrame:uiSettings.tlMovesPerFrame,res:uiSettings.tlRes,stamp},{
+            const out=await Timelapse.render(src,{fps:uiSettings.tlFps,movesPerFrame:uiSettings.tlMovesPerFrame,res:uiSettings.tlRes},{
                 signal:ex.signal,onProgress:ex.onProgress,
                 confirmPlan:pl=>pl.frames<=4000||(ex.hasModal?ex.askPlan(pl):confirm(`This timelapse is ${fmtDuration(pl.seconds)} long (${pl.moves} moves) and may take a while to encode. Continue?`))});
             if(!out)showStatus('Timelapse export cancelled');
@@ -432,7 +429,7 @@ function App(){
             }
         }catch(err){failed=err}
         finally{setVideoExporting(false);ex.end();if(wake)wake.release().catch(e=>console.error('Screen wake lock release failed',e))}
-        if(failed){console.error('Timelapse export failed, retrying with the in-memory exporter',failed);await exportVideoInMemory(legacyVideoSteps(),stamp)}
+        if(failed){console.error('Timelapse export failed, retrying with the in-memory exporter',failed);await exportVideoInMemory(legacyVideoSteps())}
     };
 
     useEffect(()=>{
