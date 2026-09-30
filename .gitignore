@@ -3,3 +3,6 @@ data/rooms/*.json
 
 # Local compose overrides, e.g. PORT=9000
 .env
+MULTIPLAYER_PLAN.md
+2026-09-30T11-37-06-minesweeper-save.json:Zone.Identifier
+demo-minesweeper-save.json

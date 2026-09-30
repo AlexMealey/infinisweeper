@@ -129,7 +129,7 @@ window.SettingsModal=function SettingsModal({hints,setHints,uiSettings,setUiSett
                         <option value="auto">Auto (up to 24 px per cell)</option><option value="720">720p (0.9 MP)</option><option value="1080">1080p (2 MP)</option><option value="1440">1440p (3.7 MP)</option><option value="2160">4K (8.3 MP)</option>
                     </select>
                 </div>
-                <div style={{color:'#777',fontSize:11,paddingLeft:90}}>The video takes the board's shape, with a border of unopened cells.{uiSettings.tlRes==='2160'&&(uiSettings.tlFps||60)===60?' At 60 fps, 4K is reduced to about 4 MP to stay within what standard H.264 players support.':''}</div>
+                <div style={{color:'#777',fontSize:11,paddingLeft:90}}>The video takes the board's shape, with a border of unopened cells, and stays under 50 MB.{uiSettings.tlRes==='2160'&&(uiSettings.tlFps||60)===60?' At 60 fps, 4K is reduced to about 4 MP to stay within what standard H.264 players support.':''}</div>
 
                 <div style={{display:'flex',justifyContent:'center',marginTop:10}}>
                     <button className="close-btn" style={{color:'#888',fontSize:12}} onClick={onClose}>Close</button>
@@ -243,8 +243,9 @@ window.ExportProgressModal=function ExportProgressModal({task}){
         :p.phase==='prepare'?'Replaying moves…'
         :p.phase==='encode'?(video?'Encoding video…':`Compressing at ${p.sz} px per cell…`)
         :p.phase==='estimate'?`Checking the size at ${p.sz} px per cell…`
+        :p.phase==='retry'?'Re-encoding to stay under 50 MB…'
         :'Finishing the file…';
-    const detail=video&&p.phase==='encode'&&p.total?`Frame ${p.done.toLocaleString()} of ${p.total.toLocaleString()}`:video&&p.phase==='prepare'&&p.total?`${p.done.toLocaleString()} of ${p.total.toLocaleString()} moves`:'';
+    const detail=video&&(p.phase==='encode'||p.phase==='retry')&&p.total?`Frame ${p.done.toLocaleString()} of ${p.total.toLocaleString()}`:video&&p.phase==='prepare'&&p.total?`${p.done.toLocaleString()} of ${p.total.toLocaleString()} moves`:'';
     return(<div className="modal-overlay"><div className="modal-panel" style={panel}>
         <h2 style={{fontSize:16,margin:0}}>{video?'🎬':'🖼'} {task.title}</h2>
         <div style={{color:'#ccc',fontSize:13}}>{label}</div>
@@ -350,7 +351,7 @@ window.StartModal=function StartModal({initialStep,hints,initialSeed,initialName
         <div className="modal-overlay" onClick={onClose}>
             <div className="modal-panel start-panel" onClick={e=>e.stopPropagation()}>
                 {onClose&&<button className="start-x" onClick={onClose} title="Close" aria-label="Close">×</button>}
-                <h2>💣 Infinite Minesweeper</h2>
+                <h2>💣 InfiniSweeper</h2>
                 {step==='choose'&&<>
                     <button className="primary start-choice" onClick={()=>go('single')}>👤 Singleplayer</button>
                     <button className="start-choice" onClick={()=>go('multi')}>👥 Multiplayer</button>

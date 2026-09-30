@@ -121,6 +121,7 @@ function App(){
     useEffect(()=>{try{localStorage.setItem('minesweeper_hints',JSON.stringify(hints))}catch(e){console.error('Failed to save hints',e)}},[hints]);
     useEffect(()=>{try{localStorage.setItem('minesweeper_ui',JSON.stringify(uiSettings))}catch(e){console.error('Failed to save UI settings',e)}},[uiSettings]);
     useEffect(()=>{try{localStorage.setItem('minesweeper_view',viewMode)}catch(e){console.error('Failed to save view mode',e)}},[viewMode]);
+    useEffect(()=>{document.title=activeSeed?`${activeSeed} - InfiniSweeper`:'InfiniSweeper'},[activeSeed]);
 
     const showStatus=useCallback(msg=>setStatus(msg),[]);
 
@@ -281,27 +282,46 @@ function App(){
 
     const fmtDuration=sec=>{const t=Math.round(sec);return`${Math.floor(t/60)}:${String(t%60).padStart(2,'0')}`};
     // Frames for the in-memory exporter: version 1 saves carry their own, otherwise replay the move log.
-    const legacyVideoFrames=()=>{
-        if(Array.isArray(timelapseRef.current)&&timelapseRef.current.length)return timelapseRef.current;
-        const ref={current:[]};replayMoveLog(activeSeed,moveLogRef.current,hints.wrongFlags,ref);return ref.current};
-    // The original exporter, which holds every frame and the whole file in memory.
+    // Board-changing moves as [{diff, flagged}] for the in-memory exporter. Only what changed is kept: holding a
+    // snapshot of every flag for every move (as recorded frames did) ran long games out of memory.
+    const legacyVideoSteps=()=>{
+        const out=[];
+        if(Array.isArray(timelapseRef.current)&&timelapseRef.current.length){
+            // Version 1 saves have recorded frames with a flag snapshot each; turn those into flag changes.
+            let prev={};
+            for(const fr of timelapseRef.current){
+                const diff=fr.diff.slice(),seen=new Set(diff.map(d=>d[0])),fl=fr.flags||{};
+                for(const k of new Set([...Object.keys(prev),...Object.keys(fl)]))if(!seen.has(k)&&fl[k]!==prev[k])diff.push([k,fl[k]]);
+                let flagged=0;for(const k in fl)if(fl[k]!=='quest')flagged++;
+                prev=fl;out.push({diff,flagged});
+            }
+            return out;
+        }
+        // Mirrors replayMoveLog.
+        const log=moveLogRef.current,first=log[0],fc=first&&first[0]==='r'?[first[1],first[2]]:null;
+        const checker=mkChecker(hashSeed(activeSeed),fc),cells={};let flagged=0;
+        for(const e of log){
+            if(!e||e.length<3)continue;const[t,x,y]=e;
+            if(t==='r'){const{diff,gameOver}=applyReveal(cells,x,y,checker,hints.wrongFlags,true);if(diff.length)out.push({diff,flagged});if(gameOver)break}
+            else if(t==='f'){const{diff,flagsDelta,changed}=applyFlag(cells,x,y,true);if(changed){flagged+=flagsDelta;out.push({diff,flagged})}}
+        }
+        return out};
+    // Hard limit on an exported timelapse, in bytes. timelapse.js enforces the same figure.
+    const VIDEO_CAP=50e6;
+    // The original exporter, which draws on a canvas and holds the whole file in memory.
     // Still used when timelapse.js didn't load, or its streamed export fails.
-    const exportVideoInMemory=async(moveFrames,stamp=exportStamp())=>{
-        if(!moveFrames.length){showStatus('No progress to export');return}
+    const exportVideoInMemory=async(steps,stamp=exportStamp())=>{
+        if(!steps.length){showStatus('No progress to export');return}
         if(typeof window.VideoEncoder==='undefined'||typeof window.VideoFrame==='undefined'||typeof window.Mp4Muxer==='undefined'){
             showStatus('Video export needs a browser with WebCodecs (try Chrome or Edge)');return}
-        if(moveFrames.length>4000&&!confirm(`This timelapse has ${moveFrames.length} moves and may take a while to encode. Continue?`))return;
+        const fps=+uiSettings.tlFps===30?30:60,perFrame=[1,2,4,8,16].includes(+uiSettings.tlMovesPerFrame)?+uiSettings.tlMovesPerFrame:1;
+        const hold=fps,total=Math.ceil(steps.length/perFrame)+hold; // hold the final board for a second
+        if(total>4000&&!confirm(`This timelapse is ${fmtDuration(total/fps)} long (${steps.length} moves) and may take a while to encode. Continue?`))return;
 
         setVideoExporting(true);showStatus('Preparing timelapse…');
         try{
-            const finalCells={};
-            for(const frame of moveFrames){
-                for(const[k,v]of frame.diff)finalCells[k]=v;
-                for(const k in frame.flags)if(!(k in finalCells))finalCells[k]=frame.flags[k];
-            }
-            const keys=Object.keys(finalCells);
             let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
-            keys.forEach(k=>{const[x,y]=k.split(',').map(Number);if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y});
+            for(const st of steps)for(const[k]of st.diff){const c=k.indexOf(','),x=+k.slice(0,c),y=+k.slice(c+1);if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y}
             const pad=2;minX-=pad;maxX+=pad;minY-=pad;maxY+=pad;
             const w=maxX-minX+1,h=maxY-minY+1;
 
@@ -324,64 +344,56 @@ function App(){
 
             const canvas=document.createElement('canvas');canvas.width=canvasW;canvas.height=canvasH;
             const ctx=canvas.getContext('2d');
-            ctx.fillStyle='#0c0c1e';ctx.fillRect(0,0,canvasW,canvasH);
-            for(let y=minY;y<=maxY;y++)for(let x=minX;x<=maxX;x++)drawCellToCanvas(ctx,null,(x-minX)*sz,(y-minY)*sz,sz);
-
-            const muxer=new Mp4Muxer.Muxer({
-                target:new Mp4Muxer.ArrayBufferTarget(),
-                video:{codec:chosen.type,width:canvasW,height:canvasH},
-                fastStart:'in-memory'
-            });
-            const videoEncoder=new VideoEncoder({
-                output:(chunk,meta)=>muxer.addVideoChunk(chunk,meta),
-                error:e=>console.error('Timelapse encode error',e)
-            });
-            const bitrate=Math.round(Math.min(8000000,Math.max(350000,canvasW*canvasH*5)));
-            const fps=60;
-            videoEncoder.configure({codec:chosen.codec,width:canvasW,height:canvasH,bitrate,framerate:fps});
-
-            const frameDurationUs=Math.round(1e6/fps), total=moveFrames.length;
-            let prevFlags={};
-            let clearedRunning=0;
-            for(let i=0;i<total;i++){
-                const{diff,flags:curFlags}=moveFrames[i];
-                const diffKeys=new Set();
-                for(const[k,v]of diff){
-                    diffKeys.add(k);
-                    if(v&&v[0]==='r')clearedRunning++;
-                    const[cx,cy]=k.split(',').map(Number);
-                    if(cx>=minX&&cx<=maxX&&cy>=minY&&cy<=maxY)drawCellToCanvas(ctx,v,(cx-minX)*sz,(cy-minY)*sz,sz);
+            const frameDurationUs=Math.round(1e6/fps);
+            const encodeAt=async bitrate=>{
+                ctx.fillStyle='#0c0c1e';ctx.fillRect(0,0,canvasW,canvasH);
+                for(let y=minY;y<=maxY;y++)for(let x=minX;x<=maxX;x++)drawCellToCanvas(ctx,null,(x-minX)*sz,(y-minY)*sz,sz);
+                const muxer=new Mp4Muxer.Muxer({
+                    target:new Mp4Muxer.ArrayBufferTarget(),
+                    video:{codec:chosen.type,width:canvasW,height:canvasH},
+                    fastStart:'in-memory'
+                });
+                let encErr=null;
+                const videoEncoder=new VideoEncoder({
+                    output:(chunk,meta)=>muxer.addVideoChunk(chunk,meta),
+                    error:e=>{encErr=encErr||e;console.error('Timelapse encode error',e)}
+                });
+                videoEncoder.configure({codec:chosen.codec,width:canvasW,height:canvasH,bitrate,framerate:fps});
+                let frame=0,done=0,cleared=0,flagged=0;
+                const emit=async()=>{
+                    drawFooterHUD(ctx,canvasW,canvasH,footerH,done,steps.length,cleared,flagged,stamp);
+                    const vf=new VideoFrame(canvas,{timestamp:frame*frameDurationUs,duration:frameDurationUs});
+                    videoEncoder.encode(vf,{keyFrame:frame%(fps*10)===0}); // a keyframe every 10s: seekable, and half the size of every 2s
+                    vf.close();frame++;
+                    if(videoEncoder.encodeQueueSize>4)await new Promise(r=>setTimeout(r,0));
+                    if(frame%25===0||frame===total){showStatus(`Encoding timelapse… ${frame}/${total}`);await new Promise(r=>setTimeout(r,0))}
+                    if(encErr)throw encErr;
+                };
+                for(const st of steps){
+                    for(const[k,v]of st.diff){if(v&&v[0]==='r')cleared++;const c=k.indexOf(',');drawCellToCanvas(ctx,v,(+k.slice(0,c)-minX)*sz,(+k.slice(c+1)-minY)*sz,sz)}
+                    flagged=st.flagged;done++;
+                    if(done%perFrame===0||done===steps.length)await emit();
                 }
-                const flagKeys=new Set([...Object.keys(prevFlags),...Object.keys(curFlags)]);
-                for(const k of flagKeys){
-                    if(diffKeys.has(k)||curFlags[k]===prevFlags[k])continue;
-                    const[fx,fy]=k.split(',').map(Number);
-                    if(fx>=minX&&fx<=maxX&&fy>=minY&&fy<=maxY)drawCellToCanvas(ctx,curFlags[k]||null,(fx-minX)*sz,(fy-minY)*sz,sz);
-                }
-                prevFlags=curFlags;
-                let flaggedRunning=0;
-                for(const k in curFlags)if(curFlags[k]!=='quest')flaggedRunning++;
-                drawFooterHUD(ctx,canvasW,canvasH,footerH,i+1,total,clearedRunning,flaggedRunning,stamp);
-                const frame=new VideoFrame(canvas,{timestamp:i*frameDurationUs,duration:frameDurationUs});
-                videoEncoder.encode(frame,{keyFrame:i===0});
-                frame.close();
-                if(videoEncoder.encodeQueueSize>4)await new Promise(r=>setTimeout(r,0));
-                if(i%25===0||i===total-1){showStatus(`Encoding timelapse… ${i+1}/${total}`);await new Promise(r=>setTimeout(r,0))}
+                for(let j=0;j<hold;j++)await emit();
+                await videoEncoder.flush();videoEncoder.close();
+                if(encErr)throw encErr;
+                muxer.finalize();
+                return muxer.target.buffer;
+            };
+            // Never more bitrate than fits the cap over this video's length; screen content rarely needs even that.
+            let bitrate=Math.round(Math.min(20e6,Math.max(3e5,canvasW*canvasH*fps*0.02),VIDEO_CAP*8*0.9/(total/fps)));
+            let buffer=await encodeAt(bitrate);
+            for(let attempt=1;attempt<3&&buffer.byteLength>VIDEO_CAP;attempt++){
+                showStatus('Re-encoding to stay under 50 MB…');
+                bitrate=Math.floor(bitrate*VIDEO_CAP/buffer.byteLength*0.85);buffer=await encodeAt(bitrate);
             }
-            for(let j=0;j<fps;j++){
-                const frame=new VideoFrame(canvas,{timestamp:(total+j)*frameDurationUs,duration:frameDurationUs});
-                videoEncoder.encode(frame);frame.close();
-            }
-
-            await videoEncoder.flush();
-            muxer.finalize();
-            const{buffer}=muxer.target;
+            if(buffer.byteLength>VIDEO_CAP){showStatus('The timelapse would be over 50 MB. Pick more moves per frame in Settings.');return}
             const blob=new Blob([buffer],{type:'video/mp4'});
             const url=URL.createObjectURL(blob);
             const a=document.createElement('a');
             a.href=url;a.download=`${exportFileDate()}-minesweeper-seed-${activeSeed}-timelapse.mp4`;a.click();
-            URL.revokeObjectURL(url);
-            showStatus('Timelapse video exported');
+            setTimeout(()=>URL.revokeObjectURL(url),60000);
+            showStatus(`Timelapse video exported (${fmtDuration(total/fps)}, ${canvasW}×${canvasH}, ${(blob.size/1e6).toFixed(1)} MB)`);
         }catch(err){
             console.error(err);
             showStatus('Video export failed: '+(err&&err.message?err.message:'unknown error'));
@@ -395,7 +407,7 @@ function App(){
         if(!v1Frames&&!moveLogRef.current.length){showStatus('No progress to export');return}
         if(typeof window.VideoEncoder==='undefined'||typeof window.VideoFrame==='undefined'||typeof window.Mp4Muxer==='undefined'){
             showStatus('Video export needs a browser with WebCodecs (try Chrome or Edge)');return}
-        if(!window.Timelapse||!Mp4Muxer.StreamTarget){await exportVideoInMemory(legacyVideoFrames());return}
+        if(!window.Timelapse||!Mp4Muxer.StreamTarget){await exportVideoInMemory(legacyVideoSteps());return}
         setVideoExporting(true);showStatus('Preparing timelapse…');
         const ex=beginExportTask('video','Exporting timelapse'),stamp=exportStamp();
         let failed=null,wake=null;
@@ -410,6 +422,7 @@ function App(){
                 confirmPlan:pl=>pl.frames<=4000||(ex.hasModal?ex.askPlan(pl):confirm(`This timelapse is ${fmtDuration(pl.seconds)} long (${pl.moves} moves) and may take a while to encode. Continue?`))});
             if(!out)showStatus('Timelapse export cancelled');
             else if(out.empty)showStatus('No progress to export');
+            else if(out.tooBig)showStatus(`The timelapse would be over ${Math.round(out.limit/1e6)} MB. Pick more moves per frame in Settings.`);
             else{
                 const url=URL.createObjectURL(out.blob);
                 const a=document.createElement('a');
@@ -419,7 +432,7 @@ function App(){
             }
         }catch(err){failed=err}
         finally{setVideoExporting(false);ex.end();if(wake)wake.release().catch(e=>console.error('Screen wake lock release failed',e))}
-        if(failed){console.error('Timelapse export failed, retrying with the in-memory exporter',failed);await exportVideoInMemory(legacyVideoFrames(),stamp)}
+        if(failed){console.error('Timelapse export failed, retrying with the in-memory exporter',failed);await exportVideoInMemory(legacyVideoSteps(),stamp)}
     };
 
     useEffect(()=>{

@@ -1,5 +1,5 @@
 {
-  "name": "Infinite Minesweeper",
+  "name": "InfiniSweeper",
   "short_name": "InfiniSweeper",
   "description": "An infinite procedurally generated minesweeper",
   "start_url": "./",
