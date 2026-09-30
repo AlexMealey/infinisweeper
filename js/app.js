@@ -200,8 +200,11 @@ function App(){
 
     const clearSave=()=>{localStorage.removeItem('minesweeper_save');lastSave.current='';lastSaveSig.current='';showStatus('Cache cleared')};
 
+    // Local time the export was made, burned into image and video footers.
+    const exportStamp=()=>{const d=new Date(),p=n=>String(n).padStart(2,'0');return`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`};
+    const exportFileDate=()=>new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
     // The original full-canvas export. Still used when mapimage.js didn't load, the browser lacks CompressionStream, or the streamed export fails.
-    const exportImageCanvas=(withStats,sz)=>{
+    const exportImageCanvas=(withStats,sz,stamp)=>{
         const keys=Object.keys(cells);
         let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
         keys.forEach(k=>{const[x,y]=k.split(',').map(Number);minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y)});
@@ -231,8 +234,12 @@ function App(){
             draw('Mines Flagged:','🚩',flags);
             draw('Moves Made:','👆',moves);
             draw('Squares Cleared:','🟦',`${clearedCount}`);
+            if(stamp){
+                const rx=canvasW-footerH*0.4;ctx.font=`bold ${fs}px sans-serif`;const k=Math.min(1,(rx-ox)/ctx.measureText(stamp).width);
+                if(k>=0.5){ctx.fillStyle='#888';ctx.font=`bold ${Math.floor(fs*k)}px sans-serif`;ctx.textAlign='right';ctx.fillText(stamp,rx,canvasH-footerH/2)}
+            }
         }
-        const link=document.createElement('a');link.download=`minesweeper-seed-${activeSeed}-run.png`;
+        const link=document.createElement('a');link.download=`${exportFileDate()}-minesweeper-seed-${activeSeed}-run.png`;
         link.href=canvas.toDataURL('image/png');link.click();showStatus('Progress image exported')};
     const[exportTask,setExportTask]=useState(null);
     // Progress goes through a tiny store that ExportProgressModal subscribes to, so ticks don't re-render the board.
@@ -253,18 +260,18 @@ function App(){
     const handleExportImage=async(withStats=true)=>{
         if(imageExportingRef.current)return;
         if(Object.keys(cells).length===0){showStatus('No progress to export');return}
-        const res=uiSettings.exportRes||'auto';
-        const canvasExport=()=>{try{exportImageCanvas(withStats,res==='auto'?32:Math.max(1,Math.min(32,parseInt(res,10)||32)))}
+        const res=uiSettings.exportRes||'auto',stamp=exportStamp();
+        const canvasExport=()=>{try{exportImageCanvas(withStats,res==='auto'?32:Math.max(1,Math.min(32,parseInt(res,10)||32)),stamp)}
             catch(err){console.error('Canvas image export failed',err);showStatus('Image export failed: '+(err&&err.message?err.message:'unknown error'))}};
         if(!window.MapImage||!window.CompressionStream){canvasExport();return}
         imageExportingRef.current=true;showStatus('Exporting image…');
         const ex=beginExportTask('image','Exporting image');
         try{
-            const stats=withStats?{flags,moves,cleared:clearedCount}:null;
+            const stats=withStats?{flags,moves,cleared:clearedCount,stamp}:null;
             const out=await MapImage.render(cells,stats,res,bytes=>confirm(`The exported image will be about ${Math.ceil(bytes/1e6)} MB. Continue?`),undefined,{signal:ex.signal,onProgress:ex.onProgress});
             if(!out){showStatus('Image export cancelled');return}
             const url=URL.createObjectURL(out.blob);
-            const link=document.createElement('a');link.download=`minesweeper-seed-${activeSeed}-run.png`;link.href=url;link.click();
+            const link=document.createElement('a');link.download=`${exportFileDate()}-minesweeper-seed-${activeSeed}-run.png`;link.href=url;link.click();
             setTimeout(()=>URL.revokeObjectURL(url),10000);
             const kb=out.blob.size/1e3;showStatus(`Progress image exported (${kb<1000?Math.ceil(kb)+' KB':(kb/1e3).toFixed(1)+' MB'}, ${out.sz}px per cell)`);
         }catch(err){
@@ -279,7 +286,7 @@ function App(){
         const ref={current:[]};replayMoveLog(activeSeed,moveLogRef.current,hints.wrongFlags,ref);return ref.current};
     // The original exporter, which holds every frame and the whole file in memory.
     // Still used when timelapse.js didn't load, or its streamed export fails.
-    const exportVideoInMemory=async moveFrames=>{
+    const exportVideoInMemory=async(moveFrames,stamp=exportStamp())=>{
         if(!moveFrames.length){showStatus('No progress to export');return}
         if(typeof window.VideoEncoder==='undefined'||typeof window.VideoFrame==='undefined'||typeof window.Mp4Muxer==='undefined'){
             showStatus('Video export needs a browser with WebCodecs (try Chrome or Edge)');return}
@@ -354,7 +361,7 @@ function App(){
                 prevFlags=curFlags;
                 let flaggedRunning=0;
                 for(const k in curFlags)if(curFlags[k]!=='quest')flaggedRunning++;
-                drawFooterHUD(ctx,canvasW,canvasH,footerH,i+1,total,clearedRunning,flaggedRunning);
+                drawFooterHUD(ctx,canvasW,canvasH,footerH,i+1,total,clearedRunning,flaggedRunning,stamp);
                 const frame=new VideoFrame(canvas,{timestamp:i*frameDurationUs,duration:frameDurationUs});
                 videoEncoder.encode(frame,{keyFrame:i===0});
                 frame.close();
@@ -372,8 +379,7 @@ function App(){
             const blob=new Blob([buffer],{type:'video/mp4'});
             const url=URL.createObjectURL(blob);
             const a=document.createElement('a');
-            const date=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
-            a.href=url;a.download=`${date}-minesweeper-seed-${activeSeed}-timelapse.mp4`;a.click();
+            a.href=url;a.download=`${exportFileDate()}-minesweeper-seed-${activeSeed}-timelapse.mp4`;a.click();
             URL.revokeObjectURL(url);
             showStatus('Timelapse video exported');
         }catch(err){
@@ -391,7 +397,7 @@ function App(){
             showStatus('Video export needs a browser with WebCodecs (try Chrome or Edge)');return}
         if(!window.Timelapse||!Mp4Muxer.StreamTarget){await exportVideoInMemory(legacyVideoFrames());return}
         setVideoExporting(true);showStatus('Preparing timelapse…');
-        const ex=beginExportTask('video','Exporting timelapse');
+        const ex=beginExportTask('video','Exporting timelapse'),stamp=exportStamp();
         let failed=null,wake=null;
         // Long exports run for minutes; stop the screen sleeping (and pausing the tab) meanwhile.
         try{if(navigator.wakeLock)wake=await navigator.wakeLock.request('screen')}catch(e){console.error('Screen wake lock unavailable',e)}
@@ -399,7 +405,7 @@ function App(){
             // In multiplayer moveLogRef is the room's full log from the server, with every player's moves.
             const src=v1Frames?{frames:v1Frames}:{seed:activeSeed,moveLog:moveLogRef.current.slice(),wrongFlags:!!hints.wrongFlags};
             // Over 4000 frames the modal first offers a faster speed; without it, fall back to a confirm().
-            const out=await Timelapse.render(src,{fps:uiSettings.tlFps,movesPerFrame:uiSettings.tlMovesPerFrame,res:uiSettings.tlRes},{
+            const out=await Timelapse.render(src,{fps:uiSettings.tlFps,movesPerFrame:uiSettings.tlMovesPerFrame,res:uiSettings.tlRes,stamp},{
                 signal:ex.signal,onProgress:ex.onProgress,
                 confirmPlan:pl=>pl.frames<=4000||(ex.hasModal?ex.askPlan(pl):confirm(`This timelapse is ${fmtDuration(pl.seconds)} long (${pl.moves} moves) and may take a while to encode. Continue?`))});
             if(!out)showStatus('Timelapse export cancelled');
@@ -407,14 +413,13 @@ function App(){
             else{
                 const url=URL.createObjectURL(out.blob);
                 const a=document.createElement('a');
-                const date=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
-                a.href=url;a.download=`${date}-minesweeper-seed-${activeSeed}-timelapse.mp4`;a.click();
+                a.href=url;a.download=`${exportFileDate()}-minesweeper-seed-${activeSeed}-timelapse.mp4`;a.click();
                 setTimeout(()=>URL.revokeObjectURL(url),60000);
                 showStatus(`Timelapse video exported (${fmtDuration(out.seconds)}, ${out.width}×${out.height}, ${(out.blob.size/1e6).toFixed(1)} MB)`);
             }
         }catch(err){failed=err}
         finally{setVideoExporting(false);ex.end();if(wake)wake.release().catch(e=>console.error('Screen wake lock release failed',e))}
-        if(failed){console.error('Timelapse export failed, retrying with the in-memory exporter',failed);await exportVideoInMemory(legacyVideoFrames())}
+        if(failed){console.error('Timelapse export failed, retrying with the in-memory exporter',failed);await exportVideoInMemory(legacyVideoFrames(),stamp)}
     };
 
     useEffect(()=>{
