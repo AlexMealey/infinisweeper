@@ -234,6 +234,21 @@ function App(){
         }
         const link=document.createElement('a');link.download=`minesweeper-seed-${activeSeed}-run.png`;
         link.href=canvas.toDataURL('image/png');link.click();showStatus('Progress image exported')};
+    const[exportTask,setExportTask]=useState(null);
+    // Progress goes through a tiny store that ExportProgressModal subscribes to, so ticks don't re-render the board.
+    const beginExportTask=(kind,title)=>{
+        let v={},resolvePlan=null,timer=null;const subs=new Set(),ctrl=new AbortController();
+        const task={kind,title,startedAt:Date.now(),plan:null,
+            progress:{get:()=>v,set:x=>{v={...v,...x};subs.forEach(f=>f(v))},sub:f=>{subs.add(f);return()=>{subs.delete(f)}}},
+            cancel:()=>{if(resolvePlan){resolvePlan(false);resolvePlan=null}ctrl.abort()},
+            start:n=>{if(resolvePlan){resolvePlan({movesPerFrame:n});resolvePlan=null}setExportTask(t=>t&&{...t,plan:null})}};
+        // Opened after 300ms so quick exports don't flash it. Absent if components.js is from an older build.
+        const hasModal=!!window.ExportProgressModal;
+        if(hasModal)timer=setTimeout(()=>setExportTask(task),300);
+        return{signal:ctrl.signal,onProgress:x=>task.progress.set(x),hasModal,
+            askPlan:pl=>new Promise(r=>{resolvePlan=r;clearTimeout(timer);setExportTask({...task,plan:pl})}),
+            end:()=>{clearTimeout(timer);setExportTask(null)}};
+    };
     const imageExportingRef=useRef(false);
     const handleExportImage=async(withStats=true)=>{
         if(imageExportingRef.current)return;
@@ -243,16 +258,19 @@ function App(){
             catch(err){console.error('Canvas image export failed',err);showStatus('Image export failed: '+(err&&err.message?err.message:'unknown error'))}};
         if(!window.MapImage||!window.CompressionStream){canvasExport();return}
         imageExportingRef.current=true;showStatus('Exporting image…');
+        const ex=beginExportTask('image','Exporting image');
         try{
             const stats=withStats?{flags,moves,cleared:clearedCount}:null;
-            const out=await MapImage.render(cells,stats,res,bytes=>confirm(`The exported image will be about ${Math.ceil(bytes/1e6)} MB. Continue?`));
+            const out=await MapImage.render(cells,stats,res,bytes=>confirm(`The exported image will be about ${Math.ceil(bytes/1e6)} MB. Continue?`),undefined,{signal:ex.signal,onProgress:ex.onProgress});
             if(!out){showStatus('Image export cancelled');return}
             const url=URL.createObjectURL(out.blob);
             const link=document.createElement('a');link.download=`minesweeper-seed-${activeSeed}-run.png`;link.href=url;link.click();
             setTimeout(()=>URL.revokeObjectURL(url),10000);
             const kb=out.blob.size/1e3;showStatus(`Progress image exported (${kb<1000?Math.ceil(kb)+' KB':(kb/1e3).toFixed(1)+' MB'}, ${out.sz}px per cell)`);
-        }catch(err){console.error('Image export failed, falling back to canvas export',err);canvasExport()}
-        finally{imageExportingRef.current=false}};
+        }catch(err){
+            if(err&&err.name==='AbortError'){showStatus('Image export cancelled');return}
+            console.error('Image export failed, falling back to canvas export',err);canvasExport()}
+        finally{imageExportingRef.current=false;ex.end()}};
 
     const fmtDuration=sec=>{const t=Math.round(sec);return`${Math.floor(t/60)}:${String(t%60).padStart(2,'0')}`};
     // Frames for the in-memory exporter: version 1 saves carry their own, otherwise replay the move log.
@@ -373,13 +391,17 @@ function App(){
             showStatus('Video export needs a browser with WebCodecs (try Chrome or Edge)');return}
         if(!window.Timelapse||!Mp4Muxer.StreamTarget){await exportVideoInMemory(legacyVideoFrames());return}
         setVideoExporting(true);showStatus('Preparing timelapse…');
-        let failed=null;
+        const ex=beginExportTask('video','Exporting timelapse');
+        let failed=null,wake=null;
+        // Long exports run for minutes; stop the screen sleeping (and pausing the tab) meanwhile.
+        try{if(navigator.wakeLock)wake=await navigator.wakeLock.request('screen')}catch(e){console.error('Screen wake lock unavailable',e)}
         try{
             // In multiplayer moveLogRef is the room's full log from the server, with every player's moves.
             const src=v1Frames?{frames:v1Frames}:{seed:activeSeed,moveLog:moveLogRef.current.slice(),wrongFlags:!!hints.wrongFlags};
+            // Over 4000 frames the modal first offers a faster speed; without it, fall back to a confirm().
             const out=await Timelapse.render(src,{fps:uiSettings.tlFps,movesPerFrame:uiSettings.tlMovesPerFrame,res:uiSettings.tlRes},{
-                confirmPlan:pl=>pl.frames<=4000||confirm(`This timelapse is ${fmtDuration(pl.seconds)} long (${pl.moves} moves) and may take a while to encode. Continue?`),
-                onProgress:f=>showStatus(`Encoding timelapse… ${Math.floor(f*100)}%`)});
+                signal:ex.signal,onProgress:ex.onProgress,
+                confirmPlan:pl=>pl.frames<=4000||(ex.hasModal?ex.askPlan(pl):confirm(`This timelapse is ${fmtDuration(pl.seconds)} long (${pl.moves} moves) and may take a while to encode. Continue?`))});
             if(!out)showStatus('Timelapse export cancelled');
             else if(out.empty)showStatus('No progress to export');
             else{
@@ -391,7 +413,7 @@ function App(){
                 showStatus(`Timelapse video exported (${fmtDuration(out.seconds)}, ${out.width}×${out.height}, ${(out.blob.size/1e6).toFixed(1)} MB)`);
             }
         }catch(err){failed=err}
-        finally{setVideoExporting(false)}
+        finally{setVideoExporting(false);ex.end();if(wake)wake.release().catch(e=>console.error('Screen wake lock release failed',e))}
         if(failed){console.error('Timelapse export failed, retrying with the in-memory exporter',failed);await exportVideoInMemory(legacyVideoFrames())}
     };
 
@@ -978,6 +1000,7 @@ function App(){
                 cellSize={cellSize} setCellSize={setCellSize}
                 onClose={()=>setShowSettings(false)}
             />}
+            {exportTask&&window.ExportProgressModal&&<window.ExportProgressModal task={exportTask}/>}
             <div className="hdr" style={{position:'relative',paddingRight:46}}>
                 {uiSettings.showLeaderboard&&<LeaderboardDropdown entries={leaderboard} currentScore={clearedCount}/>}
                 {mpRoomId

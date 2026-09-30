@@ -203,6 +203,62 @@ window.LeaderboardDropdown=function LeaderboardDropdown({entries,currentScore}){
     </div>);
 };
 
+// Progress for image and timelapse exports. Updates arrive through task.progress (a tiny store) instead of
+// props, so an export ticking away doesn't re-render the whole board. A long timelapse first shows task.plan:
+// a speed picker with the video length for each choice.
+window.ExportProgressModal=function ExportProgressModal({task}){
+    const[p,setP]=useState(task.progress.get());
+    const[speed,setSpeed]=useState(task.plan?task.plan.movesPerFrame:1);
+    const[,setTick]=useState(0);
+    const phaseStart=useRef(null);
+    useEffect(()=>task.progress.sub(setP),[task.progress]);
+    useEffect(()=>{const t=setInterval(()=>setTick(n=>n+1),500);return()=>clearInterval(t)},[]);
+    const fmt=sec=>{const t=Math.max(0,Math.round(sec)),h=Math.floor(t/3600),m=Math.floor(t/60)%60,s=String(t%60).padStart(2,'0');return h?`${h}:${String(m).padStart(2,'0')}:${s}`:`${m}:${s}`};
+    const panel={minWidth:340,maxWidth:460,padding:'16px 20px',gap:10};
+    const plan=task.plan;
+    if(plan){
+        const len=n=>fmt((Math.ceil(plan.moves/n)+plan.fps)/plan.fps);
+        return(<div className="modal-overlay"><div className="modal-panel" style={panel}>
+            <h2 style={{fontSize:16,margin:0}}>🎬 Long timelapse</h2>
+            <div style={{color:'#9ca3af',fontSize:12,textAlign:'center'}}>{plan.moves.toLocaleString()} moves · {plan.width}×{plan.height} · {plan.fps} fps</div>
+            <div style={{color:'#ccc',fontSize:12}}>More moves per frame gives a shorter video that also exports faster.</div>
+            <div style={{display:'flex',flexDirection:'column',gap:2}}>
+                {[1,2,4,8,16].map(n=><label key={n} style={{display:'flex',alignItems:'center',gap:8,padding:'3px 6px',borderRadius:5,cursor:'pointer',background:speed===n?'#2a2a55':'transparent',color:'#ddd',fontSize:13}}>
+                    <input type="radio" name="tl-speed" checked={speed===n} onChange={()=>setSpeed(n)}/>
+                    {n===1?'1 move':`${n} moves`} per frame<span style={{marginLeft:'auto',color:'#9ca3af'}}>{len(n)}</span>
+                </label>)}
+            </div>
+            <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+                <button onClick={task.cancel}>Cancel</button>
+                <button className="primary" onClick={()=>task.start(speed)}>Start export</button>
+            </div>
+        </div></div>);
+    }
+    const video=task.kind==='video';
+    const frac=p.phase==='estimate'?null:video?(p.total?Math.min(1,p.done/p.total):0):(p.done||0);
+    if(!phaseStart.current||phaseStart.current.phase!==p.phase)phaseStart.current={phase:p.phase,t:Date.now(),frac:frac||0};
+    const ps=phaseStart.current,inPhase=(Date.now()-ps.t)/1000;
+    const eta=frac!==null&&frac>ps.frac&&inPhase>2?inPhase/(frac-ps.frac)*(1-frac):null;
+    const label=!p.phase?'Starting…'
+        :p.phase==='prepare'?'Replaying moves…'
+        :p.phase==='encode'?(video?'Encoding video…':`Compressing at ${p.sz} px per cell…`)
+        :p.phase==='estimate'?`Checking the size at ${p.sz} px per cell…`
+        :'Finishing the file…';
+    const detail=video&&p.phase==='encode'&&p.total?`Frame ${p.done.toLocaleString()} of ${p.total.toLocaleString()}`:video&&p.phase==='prepare'&&p.total?`${p.done.toLocaleString()} of ${p.total.toLocaleString()} moves`:'';
+    return(<div className="modal-overlay"><div className="modal-panel" style={panel}>
+        <h2 style={{fontSize:16,margin:0}}>{video?'🎬':'🖼'} {task.title}</h2>
+        <div style={{color:'#ccc',fontSize:13}}>{label}</div>
+        <div style={{height:8,background:'#2a2a4a',borderRadius:4,overflow:'hidden'}}>
+            <div style={{height:'100%',width:frac===null?'100%':`${Math.round(frac*100)}%`,background:'#6366f1',opacity:frac===null?0.35:1,transition:'width .2s'}}/>
+        </div>
+        <div style={{display:'flex',justifyContent:'space-between',flexWrap:'wrap',gap:'2px 16px',color:'#9ca3af',fontSize:12}}>
+            <span>{detail}{detail&&frac!==null?' · ':''}{frac!==null?`${Math.floor(frac*100)}%`:''}</span>
+            <span>{fmt((Date.now()-task.startedAt)/1000)} elapsed{eta!==null?` · about ${fmt(eta)} left`:''}</span>
+        </div>
+        <div style={{display:'flex',justifyContent:'flex-end'}}><button onClick={task.cancel}>Cancel</button></div>
+    </div></div>);
+};
+
 window.GameOverModal=function GameOverModal({undoAvailable,undoInfinite,undoStack,undoStackCount,onUndo,onRestart,onNewSeed,onExportImage,onExportVideo,onClose,videoExporting,leaderboard,lastEntryDate,killerName,killerIsSelf}){
     const[closeLockSecs,setCloseLockSecs]=useState(5);
     useEffect(()=>{
