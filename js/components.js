@@ -111,7 +111,7 @@ window.SettingsModal=function SettingsModal({hints,setHints,uiSettings,setUiSett
                 <div style={{display:'flex',alignItems:'center',gap:8,padding:'2px 0'}}>
                     <span style={{color:'#aaa',fontSize:12,minWidth:82}}>Image size</span>
                     <select className="hs" value={uiSettings.exportRes||'auto'} onChange={e=>setUiSettings(u=>({...u,exportRes:e.target.value}))}>
-                        <option value="auto">Auto (under 10 MB)</option><option value="32">Full (32 px/cell)</option><option value="16">Half (16 px/cell)</option><option value="8">Quarter (8 px/cell)</option>
+                        <option value="auto">Auto (under 8 MB)</option><option value="32">Full (32 px/cell)</option><option value="16">Half (16 px/cell)</option><option value="8">Quarter (8 px/cell)</option>
                     </select>
                 </div>
 
