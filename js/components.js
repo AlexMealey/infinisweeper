@@ -114,6 +114,22 @@ window.SettingsModal=function SettingsModal({hints,setHints,uiSettings,setUiSett
                         <option value="auto">Auto (under 8 MB)</option><option value="32">Full (32 px/cell)</option><option value="16">Half (16 px/cell)</option><option value="8">Quarter (8 px/cell)</option>
                     </select>
                 </div>
+                <div style={{display:'flex',alignItems:'center',gap:8,padding:'2px 0'}}>
+                    <span style={{color:'#aaa',fontSize:12,minWidth:82}}>Timelapse speed</span>
+                    <select className="hs" value={String(uiSettings.tlMovesPerFrame||1)} onChange={e=>setUiSettings(u=>({...u,tlMovesPerFrame:+e.target.value}))}>
+                        {[1,2,4,8,16].map(n=><option key={n} value={n}>{n===1?'1 move':`${n} moves`} per frame</option>)}
+                    </select>
+                    <select className="hs" value={String(uiSettings.tlFps||60)} onChange={e=>setUiSettings(u=>({...u,tlFps:+e.target.value}))}>
+                        <option value="30">30 fps</option><option value="60">60 fps</option>
+                    </select>
+                </div>
+                <div style={{display:'flex',alignItems:'center',gap:8,padding:'2px 0'}}>
+                    <span style={{color:'#aaa',fontSize:12,minWidth:82}}>Video size</span>
+                    <select className="hs" value={uiSettings.tlRes||'auto'} onChange={e=>setUiSettings(u=>({...u,tlRes:e.target.value}))}>
+                        <option value="auto">Auto (up to 24 px per cell)</option><option value="720">720p (0.9 MP)</option><option value="1080">1080p (2 MP)</option><option value="1440">1440p (3.7 MP)</option><option value="2160">4K (8.3 MP)</option>
+                    </select>
+                </div>
+                <div style={{color:'#777',fontSize:11,paddingLeft:90}}>The video takes the board's shape, with a border of unopened cells.{uiSettings.tlRes==='2160'&&(uiSettings.tlFps||60)===60?' At 60 fps, 4K is reduced to about 4 MP to stay within what standard H.264 players support.':''}</div>
 
                 <div style={{display:'flex',justifyContent:'center',marginTop:10}}>
                     <button className="close-btn" style={{color:'#888',fontSize:12}} onClick={onClose}>Close</button>

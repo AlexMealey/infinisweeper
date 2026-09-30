@@ -1,4 +1,4 @@
-const CACHE_NAME = 'infinisweeper-v10';
+const CACHE_NAME = 'infinisweeper-v12';
 
 const CDN_TO_LOCAL = {
   'https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js': './lib/react.production.min.js',
@@ -16,6 +16,7 @@ const PRE_CACHE = [
   './css/style.css',
   './js/game.js',
   './js/mapimage.js',
+  './js/timelapse.js',
   './js/net.js',
   './js/components.js',
   './js/app.js',

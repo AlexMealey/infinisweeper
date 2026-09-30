@@ -28,7 +28,7 @@ function App(){
     const[containerSize,setContainerSize]=useState({w:800,h:600});
     const[firstClick,setFirstClick]=useState(null);
     const[hints,setHints]=useState(()=>{try{const s=localStorage.getItem('minesweeper_hints');if(s)return migrateHints(JSON.parse(s))}catch(e){console.error('Failed to read saved hints',e)}return{wrongFlags:false,pulseNeighbors:false,undoEnabled:false,undoMode:'refill',chordFlag:false}});
-    const dfltUI={showArrows:true,showScores:true,showLeaderboard:true,showUndo:true,showZoom:true,showCoords:true,showSeed:true,showSeedBox:true,showLockBtn:true,defaultCellSize:ZDEF,exportRes:'auto'};
+    const dfltUI={showArrows:true,showScores:true,showLeaderboard:true,showUndo:true,showZoom:true,showCoords:true,showSeed:true,showSeedBox:true,showLockBtn:true,defaultCellSize:ZDEF,exportRes:'auto',tlMovesPerFrame:1,tlFps:60,tlRes:'auto'};
     const[uiSettings,setUiSettings]=useState(()=>{try{const s=localStorage.getItem('minesweeper_ui');if(s)return{...dfltUI,...JSON.parse(s)}}catch(e){console.error('Failed to read saved UI settings',e)}return dfltUI});
     const[showSettings,setShowSettings]=useState(false);
     const[status,setStatus]=useState('');
@@ -42,7 +42,8 @@ function App(){
     const[lastEntryDate,setLastEntryDate]=useState(null);
     const leaderboardRecordedRef=useRef(false);
     const runIdRef=useRef(genRunId());
-    const timelapseRef=useRef([]);
+    // null: the timelapse is rebuilt from moveLogRef. An array only for version 1 saves, which have no move log.
+    const timelapseRef=useRef(null);
     const moveLogRef=useRef([]);
     const curFlagsRef=useRef({});
     const clearedCount = useMemo(() => Object.values(cells).filter(s => s && s[0] === 'r').length, [cells]);
@@ -139,7 +140,7 @@ function App(){
             setHints(migrateHints(data.hints));
             runIdRef.current=data.runId||genRunId();
             moveLogRef.current=log;
-            timelapseRef.current=log.length?null:[];
+            timelapseRef.current=null;
             const out=replayMoveLog(data.activeSeed,log,!!(data.hints&&data.hints.wrongFlags),null);
             curFlagsRef.current=out.finalFlags;
             setCells(out.cells);setMoves(out.moves);setFlags(out.flags);setGameOver(out.gameOver);setFirstClick(out.firstClick);
@@ -159,7 +160,7 @@ function App(){
             moveLogRef.current=[];
             const flagsNow=extractFlags(data.cells||{});
             curFlagsRef.current=flagsNow;
-            timelapseRef.current=(data.cells&&Object.keys(data.cells).length>0)?[{diff:Object.entries(data.cells),flags:flagsNow}]:[];
+            timelapseRef.current=(data.cells&&Object.keys(data.cells).length>0)?[{diff:Object.entries(data.cells),flags:flagsNow}]:null;
             setClearedAtLastUndo(null);
             setUndoUsedCount(0);
             setShowGameOverModal(!!data.gameOver);
@@ -253,16 +254,14 @@ function App(){
         }catch(err){console.error('Image export failed, falling back to canvas export',err);canvasExport()}
         finally{imageExportingRef.current=false}};
 
-    const handleExportVideo=async()=>{
-        if(videoExporting)return;
-        if(timelapseRef.current===null){
-            if(!moveLogRef.current.length){showStatus('No progress to export');return}
-            setVideoExporting(true);showStatus('Preparing timelapse…');
-            timelapseRef.current=[];
-            replayMoveLog(activeSeed,moveLogRef.current,hints.wrongFlags,timelapseRef);
-            setVideoExporting(false);
-        }
-        const moveFrames=timelapseRef.current;
+    const fmtDuration=sec=>{const t=Math.round(sec);return`${Math.floor(t/60)}:${String(t%60).padStart(2,'0')}`};
+    // Frames for the in-memory exporter: version 1 saves carry their own, otherwise replay the move log.
+    const legacyVideoFrames=()=>{
+        if(Array.isArray(timelapseRef.current)&&timelapseRef.current.length)return timelapseRef.current;
+        const ref={current:[]};replayMoveLog(activeSeed,moveLogRef.current,hints.wrongFlags,ref);return ref.current};
+    // The original exporter, which holds every frame and the whole file in memory.
+    // Still used when timelapse.js didn't load, or its streamed export fails.
+    const exportVideoInMemory=async moveFrames=>{
         if(!moveFrames.length){showStatus('No progress to export');return}
         if(typeof window.VideoEncoder==='undefined'||typeof window.VideoFrame==='undefined'||typeof window.Mp4Muxer==='undefined'){
             showStatus('Video export needs a browser with WebCodecs (try Chrome or Edge)');return}
@@ -366,6 +365,35 @@ function App(){
             setVideoExporting(false);
         }
     };
+    const handleExportVideo=async()=>{
+        if(videoExporting)return;
+        const v1Frames=Array.isArray(timelapseRef.current)&&timelapseRef.current.length?timelapseRef.current:null;
+        if(!v1Frames&&!moveLogRef.current.length){showStatus('No progress to export');return}
+        if(typeof window.VideoEncoder==='undefined'||typeof window.VideoFrame==='undefined'||typeof window.Mp4Muxer==='undefined'){
+            showStatus('Video export needs a browser with WebCodecs (try Chrome or Edge)');return}
+        if(!window.Timelapse||!Mp4Muxer.StreamTarget){await exportVideoInMemory(legacyVideoFrames());return}
+        setVideoExporting(true);showStatus('Preparing timelapse…');
+        let failed=null;
+        try{
+            // In multiplayer moveLogRef is the room's full log from the server, with every player's moves.
+            const src=v1Frames?{frames:v1Frames}:{seed:activeSeed,moveLog:moveLogRef.current.slice(),wrongFlags:!!hints.wrongFlags};
+            const out=await Timelapse.render(src,{fps:uiSettings.tlFps,movesPerFrame:uiSettings.tlMovesPerFrame,res:uiSettings.tlRes},{
+                confirmPlan:pl=>pl.frames<=4000||confirm(`This timelapse is ${fmtDuration(pl.seconds)} long (${pl.moves} moves) and may take a while to encode. Continue?`),
+                onProgress:f=>showStatus(`Encoding timelapse… ${Math.floor(f*100)}%`)});
+            if(!out)showStatus('Timelapse export cancelled');
+            else if(out.empty)showStatus('No progress to export');
+            else{
+                const url=URL.createObjectURL(out.blob);
+                const a=document.createElement('a');
+                const date=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+                a.href=url;a.download=`${date}-minesweeper-seed-${activeSeed}-timelapse.mp4`;a.click();
+                setTimeout(()=>URL.revokeObjectURL(url),60000);
+                showStatus(`Timelapse video exported (${fmtDuration(out.seconds)}, ${out.width}×${out.height}, ${(out.blob.size/1e6).toFixed(1)} MB)`);
+            }
+        }catch(err){failed=err}
+        finally{setVideoExporting(false)}
+        if(failed){console.error('Timelapse export failed, retrying with the in-memory exporter',failed);await exportVideoInMemory(legacyVideoFrames())}
+    };
 
     useEffect(()=>{
         // In multiplayer mode, initial state comes from sync.php, not localStorage.
@@ -467,7 +495,7 @@ function App(){
         }
         const out=replayMoveLog(seed,canonical,!!wrongFlags,null);
         curFlagsRef.current=out.finalFlags;
-        timelapseRef.current=canonical.length?null:[];
+        timelapseRef.current=null;
         moveLogRef.current=canonical;
         setCells(out.cells);
         setMoves(out.moves);
@@ -629,8 +657,8 @@ function App(){
         const nmx=(e.clientX-rect.left-nPx)/nz,nmy=(e.clientY-rect.top-nPy)/nz;
         setCellSize(nz);setViewX(Math.round(cux-nmx+nC/2));setViewY(Math.round(cuy-nmy+nR/2))},[cellSize,viewX,viewY]);
 
-    const applySeed=s=>{const ns=s.trim()||rndSeed();runIdRef.current=genRunId();setSeedStr(ns);setActiveSeed(ns);setCells({});setGameOver(false);setMoves(0);setFlags(0);setViewX(0);setViewY(0);setCellSize(uiSettings.defaultCellSize);setFirstClick(null);fcProcessed.current=false;timelapseRef.current=[];moveLogRef.current=[];curFlagsRef.current={};setClearedAtLastUndo(null);setUndoUsedCount(0);setShowGameOverModal(false);localStorage.removeItem('minesweeper_save');lastSave.current='';lastSaveSig.current=''};
-    const restart=()=>{runIdRef.current=genRunId();setCells({});setGameOver(false);setMoves(0);setFlags(0);setViewX(0);setViewY(0);setCellSize(uiSettings.defaultCellSize);setFirstClick(null);fcProcessed.current=false;timelapseRef.current=[];moveLogRef.current=[];curFlagsRef.current={};setClearedAtLastUndo(null);setUndoUsedCount(0);setShowGameOverModal(false);localStorage.removeItem('minesweeper_save');lastSave.current='';lastSaveSig.current=''};
+    const applySeed=s=>{const ns=s.trim()||rndSeed();runIdRef.current=genRunId();setSeedStr(ns);setActiveSeed(ns);setCells({});setGameOver(false);setMoves(0);setFlags(0);setViewX(0);setViewY(0);setCellSize(uiSettings.defaultCellSize);setFirstClick(null);fcProcessed.current=false;timelapseRef.current=null;moveLogRef.current=[];curFlagsRef.current={};setClearedAtLastUndo(null);setUndoUsedCount(0);setShowGameOverModal(false);localStorage.removeItem('minesweeper_save');lastSave.current='';lastSaveSig.current=''};
+    const restart=()=>{runIdRef.current=genRunId();setCells({});setGameOver(false);setMoves(0);setFlags(0);setViewX(0);setViewY(0);setCellSize(uiSettings.defaultCellSize);setFirstClick(null);fcProcessed.current=false;timelapseRef.current=null;moveLogRef.current=[];curFlagsRef.current={};setClearedAtLastUndo(null);setUndoUsedCount(0);setShowGameOverModal(false);localStorage.removeItem('minesweeper_save');lastSave.current='';lastSaveSig.current=''};
     const changeView=v=>{if(v==='Fullscreen')prevMode.current=viewMode;setViewMode(v)};
 
     const undoInfinite=hints.undoEnabled&&hints.undoMode==='infinite';
@@ -726,7 +754,7 @@ function App(){
         log[fi]=['u',fx,fy];
         const out=replayMoveLog(activeSeed,log,hints.wrongFlags,null);
         curFlagsRef.current=out.finalFlags;
-        timelapseRef.current=log.length?null:[];
+        timelapseRef.current=null;
         setCells(out.cells);setMoves(out.moves);setFlags(out.flags);setGameOver(out.gameOver);setFirstClick(out.firstClick);
         setClearedAtLastUndo(out.clearedAtLastUndo);
         setUndoUsedCount(out.undoUsedCount);
