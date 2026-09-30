@@ -28,7 +28,7 @@ function App(){
     const[containerSize,setContainerSize]=useState({w:800,h:600});
     const[firstClick,setFirstClick]=useState(null);
     const[hints,setHints]=useState(()=>{try{const s=localStorage.getItem('minesweeper_hints');if(s)return migrateHints(JSON.parse(s))}catch(e){console.error('Failed to read saved hints',e)}return{wrongFlags:false,pulseNeighbors:false,undoEnabled:false,undoMode:'refill',chordFlag:false}});
-    const dfltUI={showArrows:true,showScores:true,showLeaderboard:true,showUndo:true,showZoom:true,showCoords:true,showSeed:true,showSeedBox:true,showLockBtn:true,defaultCellSize:ZDEF};
+    const dfltUI={showArrows:true,showScores:true,showLeaderboard:true,showUndo:true,showZoom:true,showCoords:true,showSeed:true,showSeedBox:true,showLockBtn:true,defaultCellSize:ZDEF,exportRes:'auto'};
     const[uiSettings,setUiSettings]=useState(()=>{try{const s=localStorage.getItem('minesweeper_ui');if(s)return{...dfltUI,...JSON.parse(s)}}catch(e){console.error('Failed to read saved UI settings',e)}return dfltUI});
     const[showSettings,setShowSettings]=useState(false);
     const[status,setStatus]=useState('');
@@ -199,40 +199,22 @@ function App(){
 
     const clearSave=()=>{localStorage.removeItem('minesweeper_save');lastSave.current='';lastSaveSig.current='';showStatus('Cache cleared')};
 
-    const handleExportImage=(withStats=true)=>{
-        const keys=Object.keys(cells);
-        if(keys.length===0){showStatus('No progress to export');return}
-        let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
-        keys.forEach(k=>{const[x,y]=k.split(',').map(Number);minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y)});
-        const pad=2;
-        minX-=pad;maxX+=pad;minY-=pad;maxY+=pad;
-        const w=maxX-minX+1,h=maxY-minY+1;
-        const sz=32, gridH=h*sz, footerH=withStats?Math.round(gridH*0.04/0.96):0;
-        const canvasW=w*sz, canvasH=gridH+footerH;
-        if(canvasW*canvasH>16000000){if(!confirm('The exported image will be very large. Continue?'))return}
-        const canvas=document.createElement('canvas');canvas.width=canvasW;canvas.height=canvasH;
-        const ctx=canvas.getContext('2d');
-        ctx.fillStyle='#0c0c1e';ctx.fillRect(0,0,canvasW,canvasH);
-        for(let y=minY;y<=maxY;y++){
-            for(let x=minX;x<=maxX;x++){
-                drawCellToCanvas(ctx,cells[`${x},${y}`],(x-minX)*sz,(y-minY)*sz,sz);}}
-        if(withStats && footerH > 0){
-            ctx.fillStyle='#111128';ctx.fillRect(0,canvasH-footerH,canvasW,footerH);
-            ctx.strokeStyle='#2a2a4a';ctx.lineWidth=Math.max(1, Math.round(footerH/48));ctx.strokeRect(0,canvasH-footerH,canvasW,footerH);
-            const fs=Math.round(footerH*0.3), emojiFs=Math.round(footerH*0.35);
-            ctx.font=`bold ${fs}px sans-serif`;ctx.textAlign='left';ctx.textBaseline='middle';
-            let ox=footerH*0.4;
-            const draw=(l,i,v)=>{
-                ctx.fillStyle='#aaa';ctx.font=`bold ${fs}px sans-serif`;ctx.fillText(l,ox,canvasH-footerH/2);ox+=ctx.measureText(l).width+footerH*0.1;
-                ctx.font=`${emojiFs}px serif`;ctx.fillText(i,ox,canvasH-footerH/2);ox+=footerH*0.45;
-                ctx.fillStyle='#fff';ctx.font=`bold ${fs}px sans-serif`;ctx.fillText(v,ox,canvasH-footerH/2);
-                ox+=ctx.measureText(v).width+footerH*0.6};
-            draw('Mines Flagged:','🚩',flags);
-            draw('Moves Made:','👆',moves);
-            draw('Squares Cleared:','🟦',`${clearedCount}`);
-        }
-        const link=document.createElement('a');link.download=`minesweeper-seed-${activeSeed}-run.png`;
-        link.href=canvas.toDataURL('image/png');link.click();showStatus('Progress image exported')};
+    const imageExportingRef=useRef(false);
+    const handleExportImage=async(withStats=true)=>{
+        if(imageExportingRef.current)return;
+        if(Object.keys(cells).length===0){showStatus('No progress to export');return}
+        if(!window.CompressionStream){showStatus('Image export needs a newer browser');return}
+        imageExportingRef.current=true;showStatus('Exporting image…');
+        try{
+            const stats=withStats?{flags,moves,cleared:clearedCount}:null;
+            const out=await MapImage.render(cells,stats,uiSettings.exportRes,IMG_SIZE_LIMIT,bytes=>confirm(`The exported image will be about ${Math.ceil(bytes/1e6)} MB. Continue?`));
+            if(!out){showStatus('Image export cancelled');return}
+            const url=URL.createObjectURL(out.blob);
+            const link=document.createElement('a');link.download=`minesweeper-seed-${activeSeed}-run.png`;link.href=url;link.click();
+            setTimeout(()=>URL.revokeObjectURL(url),10000);
+            const kb=out.blob.size/1e3;showStatus(`Progress image exported (${kb<1000?Math.ceil(kb)+' KB':(kb/1e3).toFixed(1)+' MB'}, ${out.sz}px per cell)`);
+        }catch(err){console.error('Image export failed',err);showStatus('Image export failed: '+(err&&err.message?err.message:'unknown error'))}
+        finally{imageExportingRef.current=false}};
 
     const handleExportVideo=async()=>{
         if(videoExporting)return;

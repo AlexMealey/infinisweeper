@@ -107,6 +107,14 @@ window.SettingsModal=function SettingsModal({hints,setHints,uiSettings,setUiSett
                 <StepRow label="Zoom" value={`${zoomPct}%`} onDec={()=>setCellSize(s=>Math.max(ZMIN,s-ZSTEP))} onInc={()=>setCellSize(s=>Math.min(ZMAX,s+ZSTEP))} reset={()=>setCellSize(uiSettings.defaultCellSize)}/>
                 <StepRow label="Default zoom" value={`${defPct}%`} onDec={()=>setUiSettings(u=>({...u,defaultCellSize:Math.max(ZMIN,u.defaultCellSize-ZSTEP)}))} onInc={()=>setUiSettings(u=>({...u,defaultCellSize:Math.min(ZMAX,u.defaultCellSize+ZSTEP)}))}/>
 
+                <Sec>Export</Sec>
+                <div style={{display:'flex',alignItems:'center',gap:8,padding:'2px 0'}}>
+                    <span style={{color:'#aaa',fontSize:12,minWidth:82}}>Image size</span>
+                    <select className="hs" value={uiSettings.exportRes} onChange={e=>setUiSettings(u=>({...u,exportRes:e.target.value}))}>
+                        {IMG_RES_OPTIONS.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+                    </select>
+                </div>
+
                 <div style={{display:'flex',justifyContent:'center',marginTop:10}}>
                     <button className="close-btn" style={{color:'#888',fontSize:12}} onClick={onClose}>Close</button>
                 </div>
