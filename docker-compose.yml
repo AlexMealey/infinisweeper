@@ -6,6 +6,13 @@ services:
     restart: unless-stopped
     ports:
       - "${PORT:-8080}:80"
+      # HTTPS, self-signed unless you supply a certificate. Needed for video export on anything but localhost.
+      - "${HTTPS_PORT:-8443}:443"
+    environment:
+      # Extra names/IPs for the self-signed certificate, e.g. TLS_HOSTS=192.168.1.20,mypc.local
+      - TLS_HOSTS=${TLS_HOSTS:-}
     volumes:
       # Multiplayer room saves live on the host in ./data/rooms
       - ./data/rooms:/var/www/html/data/rooms
+      # The HTTPS certificate, kept across rebuilds. Put your own cert.pem and key.pem here to use them.
+      - ./data/tls:/var/lib/infinisweeper/tls

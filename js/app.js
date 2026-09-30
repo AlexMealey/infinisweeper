@@ -123,7 +123,17 @@ function App(){
     useEffect(()=>{try{localStorage.setItem('minesweeper_view',viewMode)}catch(e){console.error('Failed to save view mode',e)}},[viewMode]);
     useEffect(()=>{document.title=activeSeed?`${activeSeed} - InfiniSweeper`:'InfiniSweeper'},[activeSeed]);
 
-    const showStatus=useCallback(msg=>setStatus(msg),[]);
+    // Fullscreen hides the status line under the board, so the latest status also shows as a toast there.
+    // It's one toast updated in place, so progress messages don't pile up; longer messages stay up longer.
+    const[statusToast,setStatusToast]=useState(null);
+    const statusToastTimer=useRef(null);
+    const showStatus=useCallback(msg=>{
+        setStatus(msg);
+        clearTimeout(statusToastTimer.current);
+        if(!msg){setStatusToast(null);return}
+        setStatusToast({id:'status',text:msg});
+        statusToastTimer.current=setTimeout(()=>setStatusToast(null),Math.max(5000,String(msg).length*70));
+    },[]);
 
     const getGameState=useCallback(()=>({
         version:3,activeSeed,locked,viewMode,cellSize,viewX,viewY,hints,moveLog:encodeMoveLog(moveLogRef.current),timestamp:Date.now(),runId:runIdRef.current
@@ -301,14 +311,21 @@ function App(){
             else if(t==='f'){const{diff,flagsDelta,changed}=applyFlag(cells,x,y,true);if(changed){flagged+=flagsDelta;out.push({diff,flagged})}}
         }
         return out};
+    // Why video export can't run here, or null. Browsers only expose VideoEncoder on secure pages (https:// or
+    // localhost), so plain http:// on a LAN address has it missing even in Chrome; say that instead of blaming the browser.
+    const videoExportBlocker=()=>{
+        if(typeof window.VideoEncoder!=='undefined'&&typeof window.VideoFrame!=='undefined'&&typeof window.Mp4Muxer!=='undefined')return null;
+        if(window.isSecureContext===false)return`Video export needs a secure page: open https://${location.hostname}:8443 (the Docker HTTPS port) or use localhost. Browsers switch the video encoder off on ${location.protocol}//${location.host}.`;
+        if(typeof window.Mp4Muxer==='undefined')return'The video export library failed to load. Reload the page and try again.';
+        return'Video export needs a browser with WebCodecs (try Chrome or Edge)';
+    };
     // Hard limit on an exported timelapse, in bytes. timelapse.js enforces the same figure.
     const VIDEO_CAP=50e6;
     // The original exporter, which draws on a canvas and holds the whole file in memory.
     // Still used when timelapse.js didn't load, or its streamed export fails.
     const exportVideoInMemory=async steps=>{
         if(!steps.length){showStatus('No progress to export');return}
-        if(typeof window.VideoEncoder==='undefined'||typeof window.VideoFrame==='undefined'||typeof window.Mp4Muxer==='undefined'){
-            showStatus('Video export needs a browser with WebCodecs (try Chrome or Edge)');return}
+        const blocked=videoExportBlocker();if(blocked){showStatus(blocked);return}
         const fps=+uiSettings.tlFps===30?30:60,perFrame=[1,2,4,8,16].includes(+uiSettings.tlMovesPerFrame)?+uiSettings.tlMovesPerFrame:1;
         const hold=fps,total=Math.ceil(steps.length/perFrame)+hold; // hold the final board for a second
         if(total>4000&&!confirm(`This timelapse is ${fmtDuration(total/fps)} long (${steps.length} moves) and may take a while to encode. Continue?`))return;
@@ -402,8 +419,7 @@ function App(){
         if(videoExporting)return;
         const v1Frames=Array.isArray(timelapseRef.current)&&timelapseRef.current.length?timelapseRef.current:null;
         if(!v1Frames&&!moveLogRef.current.length){showStatus('No progress to export');return}
-        if(typeof window.VideoEncoder==='undefined'||typeof window.VideoFrame==='undefined'||typeof window.Mp4Muxer==='undefined'){
-            showStatus('Video export needs a browser with WebCodecs (try Chrome or Edge)');return}
+        const blocked=videoExportBlocker();if(blocked){showStatus(blocked);return}
         if(!window.Timelapse||!Mp4Muxer.StreamTarget){await exportVideoInMemory(legacyVideoSteps());return}
         setVideoExporting(true);showStatus('Preparing timelapse…');
         const ex=beginExportTask('video','Exporting timelapse');
@@ -1007,7 +1023,7 @@ function App(){
                 killerName={mpKillerName}
                 killerIsSelf={mpKillerIsSelf}
             />}
-            {mpRoomId&&<ToastStack toasts={mpToasts} vote={mpResetVote} selfId={mpPlayerId} onVote={(id,yes)=>Net.vote(id,yes)}/>}
+            {(mpRoomId||isFS)&&<ToastStack toasts={isFS&&statusToast?[...mpToasts,statusToast]:mpToasts} vote={mpRoomId?mpResetVote:null} selfId={mpPlayerId} onVote={(id,yes)=>Net.vote(id,yes)}/>}
             {showSettings&&<SettingsModal
                 hints={hints} setHints={setHints}
                 uiSettings={uiSettings} setUiSettings={setUiSettings}
