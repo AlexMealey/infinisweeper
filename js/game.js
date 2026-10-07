@@ -77,6 +77,26 @@ window.drawCellToCanvas=function(ctx,st,dx,dy,sz){
     else{let g=ctx.createLinearGradient(dx,dy,dx+sz,dy+sz);g.addColorStop(0,'#38385a');g.addColorStop(1,'#2c2c4a');ctx.fillStyle=g;ctx.fillRect(dx,dy,sz,sz)}
     ctx.strokeRect(dx,dy,sz,sz)
 };
+// For video export. Firefox's H.264 decoder description (avcC) is malformed: it repeats the first byte of each
+// parameter set and leaves the reserved bits clear. Browsers play it anyway, but Windows' own player can't, so a
+// malformed one is rebuilt from the SPS and PPS the encoder also puts in its keyframes. key is that keyframe's data.
+window.fixAvcC=function(desc,key){
+    const a=desc instanceof ArrayBuffer?new Uint8Array(desc):new Uint8Array(desc.buffer,desc.byteOffset,desc.byteLength);
+    if(a.length>9&&a[0]===1&&(a[4]&0xFC)===0xFC&&(a[5]&0xE0)===0xE0&&(a[8]&31)===7&&a[9]===a[1])return desc;
+    const n=(a[4]&3)+1,sps=[],pps=[];
+    for(let q=0;q+n<=key.length;){
+        let len=0;for(let b=0;b<n;b++)len=len*256+key[q+b];
+        const nal=key.subarray(q+n,q+n+len),type=nal[0]&31;
+        if(type===7)sps.push(nal);else if(type===8)pps.push(nal);
+        q+=n+len;
+    }
+    if(!sps.length||!pps.length||sps[0].length<4)return desc; // nothing to rebuild it from
+    const p=sps[0],out=[1,p[1],p[2],p[3],0xFC|(n-1),0xE0|sps.length];
+    for(const x of sps)out.push(x.length>>8,x.length&255,...x);
+    out.push(pps.length);for(const x of pps)out.push(x.length>>8,x.length&255,...x);
+    if([100,110,122,144].includes(p[1]))out.push(0xFD,0xF8,0xF8,0); // High profiles: 4:2:0, 8-bit, no SPS extensions
+    return new Uint8Array(out);
+};
 window.drawFooterHUD=function(ctx,canvasW,canvasH,footerH,move,total,cleared,flagged){
     ctx.fillStyle='#111128';ctx.fillRect(0,canvasH-footerH,canvasW,footerH);
     ctx.strokeStyle='#2a2a4a';ctx.lineWidth=Math.max(1,Math.round(footerH/48));ctx.strokeRect(0,canvasH-footerH,canvasW,footerH);

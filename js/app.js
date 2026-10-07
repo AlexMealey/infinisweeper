@@ -384,14 +384,13 @@ function App(){
             const encodeAt=async bitrate=>{
                 ctx.fillStyle='#0c0c1e';ctx.fillRect(0,0,canvasW,canvasH);
                 for(let y=minY;y<=maxY;y++)for(let x=minX;x<=maxX;x++)drawCellToCanvas(ctx,null,(x-minX)*sz,(y-minY)*sz,sz);
-                const muxer=new Mp4Muxer.Muxer({
-                    target:new Mp4Muxer.ArrayBufferTarget(),
-                    video:{codec:chosen.type,width:canvasW,height:canvasH},
-                    fastStart:'in-memory'
-                });
+                // Chunks are muxed once encoding is done. Some encoders (Firefox's) reorder frames and shift their
+                // timestamps, and WebCodecs reports only presentation times; chunks come in decode order, so the
+                // n-th decodes at the n-th presentation time, moved earlier by the deepest reordering.
+                const chunks=[];
                 let encErr=null;
                 const videoEncoder=new VideoEncoder({
-                    output:(chunk,meta)=>muxer.addVideoChunk(chunk,meta),
+                    output:(chunk,meta)=>{const data=new Uint8Array(chunk.byteLength);chunk.copyTo(data);chunks.push({data,type:chunk.type,pts:chunk.timestamp,meta})},
                     error:e=>{encErr=encErr||e;console.error('Timelapse encode error',e)}
                 });
                 videoEncoder.configure({codec:chosen.codec,width:canvasW,height:canvasH,bitrate,framerate:fps});
@@ -415,6 +414,20 @@ function App(){
                 for(let j=0;j<hold;j++)await emit();
                 await videoEncoder.flush();videoEncoder.close();
                 if(encErr)throw encErr;
+                const muxer=new Mp4Muxer.Muxer({
+                    target:new Mp4Muxer.ArrayBufferTarget(),
+                    video:{codec:chosen.type,width:canvasW,height:canvasH},
+                    fastStart:'in-memory',firstTimestampBehavior:'offset'
+                });
+                const shown=chunks.map(c=>c.pts).sort((a,b)=>a-b);let lead=0;
+                chunks.forEach((c,n)=>{lead=Math.max(lead,shown[n]-c.pts)});
+                chunks.forEach((c,n)=>{
+                    let meta=c.meta;
+                    // Firefox's decoder description is malformed in a way Windows' player can't read (see fixAvcC in game.js).
+                    if(meta&&meta.decoderConfig&&meta.decoderConfig.description&&window.fixAvcC)
+                        meta={...meta,decoderConfig:{...meta.decoderConfig,description:window.fixAvcC(meta.decoderConfig.description,c.data)}};
+                    muxer.addVideoChunkRaw(c.data,c.type,c.pts,frameDurationUs,meta,c.pts-(shown[n]-lead));
+                });
                 muxer.finalize();
                 return muxer.target.buffer;
             };

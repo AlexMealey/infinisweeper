@@ -211,6 +211,29 @@ function blobTarget(){
 
 const frameTs=(i,fps)=>Math.round(i*1e6/fps);
 
+// WebCodecs only reports presentation times, and an encoder may reorder frames (B-frames: Firefox's does) and
+// shift its timestamps (Firefox's come out a frame late). Chunks arrive in decode order, so decode times are
+// rebuilt: a segment's n-th chunk decodes at its n-th frame's time, moved earlier by the deepest reordering,
+// which is learnt from the first chunks. out(chunk, meta, pts, cto) gets the composition offset (pts - dts).
+function decodeTimes(fps,f0,out){
+    const LEARN=24,held=[];let shift=0,depth=-1,n=0;
+    const send=([chunk,meta])=>{
+        const pts=chunk.timestamp;let dts=frameTs(f0+n-depth,fps)+shift;n++;
+        // Encoders round to their own timebase, so a decode time can land a microsecond past its frame's.
+        if(dts>pts){if(dts-pts>frameTs(1,fps)/2)throw new Error('The video encoder reorders frames more than expected');dts=pts}
+        out(chunk,meta,pts,pts-dts);
+    };
+    const learn=()=>{
+        shift=held[0][0].timestamp-frameTs(f0,fps); // a segment starts on a keyframe, which is also its first frame shown
+        depth=0;held.forEach(([c],k)=>{const shown=Math.round((c.timestamp-shift)*fps/1e6)-f0;if(k-shown>depth)depth=k-shown});
+        held.splice(0).forEach(send);
+    };
+    return{
+        add(chunk,meta){if(depth>=0)send([chunk,meta]);else{held.push([chunk,meta]);if(held.length>=LEARN)learn()}},
+        flush(){if(depth<0&&held.length)learn()},
+    };
+}
+
 // Browser H.264 encoder (WebCodecs) for one segment of the video. Encoded chunks go to onChunk(chunk, meta).
 function webCodecsSink(cfg,bitrate,W,H,fps,buf,onChunk){
     let canvas=null;
@@ -446,11 +469,19 @@ async function render(src,opts,hooks={}){
         };
         const run=async seg=>{
             const board=makeBoard(),{drawChange,footer}=board;board.live=seg.f0===0;
+            const order=slow?null:decodeTimes(fps,seg.f0,(chunk,meta,pts,cto)=>{
+                const d=new Uint8Array(chunk.byteLength);chunk.copyTo(d);
+                if(seg.held)seg.held.push([d,chunk.type,pts,cto]);else muxer.addVideoChunkRaw(d,chunk.type,pts,frameTs(1,fps),meta,cto);
+            });
             seg.sink=slow?await wasmSink(bitrate,W,H,fps,p.level,board.buf):webCodecsSink(cfg,bitrate,W,H,fps,board.buf,(chunk,meta)=>{
                 seg.bytes+=chunk.byteLength;
+                // Firefox's decoder description needs repairing for Windows' player (see fixAvcC in game.js).
+                if(meta&&meta.decoderConfig&&meta.decoderConfig.description){
+                    const key=new Uint8Array(chunk.byteLength);chunk.copyTo(key);
+                    meta={...meta,decoderConfig:{...meta.decoderConfig,description:window.fixAvcC?window.fixAvcC(meta.decoderConfig.description,key):meta.decoderConfig.description}};
+                }
                 if(!seg.config&&meta&&meta.decoderConfig)seg.config=meta.decoderConfig;
-                if(!seg.held){muxer.addVideoChunk(chunk,meta);return}
-                const d=new Uint8Array(chunk.byteLength);chunk.copyTo(d);seg.held.push([d,chunk.type,chunk.timestamp,chunk.duration??frameTs(1,fps)]);
+                order.add(chunk,meta);
             });
             let frame=0,done=0,cleared=0,flagged=0;
             const emit=async()=>{
@@ -469,7 +500,9 @@ async function render(src,opts,hooks={}){
                 done++;if(done%perFrame===0||done===moves)await emit();
             }
             while(frame<seg.f1)await emit();
-            return seg.sink.finish();
+            const result=await seg.sink.finish();
+            if(order)order.flush();
+            return result;
         };
         try{
             const results=await Promise.all(segs.map(s=>run(s).catch(e=>{stop=true;throw e})));
@@ -479,22 +512,26 @@ async function render(src,opts,hooks={}){
             // if not, the export starts over as a single segment.
             const c0=segs[0].config;
             for(const seg of segs.slice(1))if(!c0||!seg.config||seg.config.codec!==c0.codec||!sameBytes(seg.config.description,c0.description))throw MISMATCH;
-            for(const seg of segs.slice(1))for(const[d,type,ts,dur]of seg.held)muxer.addVideoChunkRaw(d,type,ts,dur);
+            try{for(const seg of segs.slice(1))for(const[d,type,pts,cto]of seg.held)muxer.addVideoChunkRaw(d,type,pts,frameTs(1,fps),undefined,cto)}
+            catch(e){console.error('Could not join the video halves, encoding in one piece instead',e);throw MISMATCH}
             muxer.finalize();
             return out.blob();
         }finally{stop=true;for(const s of segs)if(s.sink)s.sink.close()}
     };
 
+    // Scaled from the bitrate the encoder actually produced, not the one asked for: some (Firefox's) level off
+    // well below a high target, so scaling the target alone could miss the cap again.
+    const nextBitrate=size=>Math.floor(Math.min(bitrate,size*8/(total/fps))*SIZE_CAP*0.85/size);
     let bitrate=p.bitrate,blob=null;
     for(let attempt=0;attempt<3&&!blob;attempt++){
         try{blob=await encodeAt(bitrate,attempt?'retry':'encode',parallel?2:1)}
         catch(e){
             if(e===MISMATCH){parallel=false;attempt--;continue}
             if(!OVERSIZE(e))throw e;
-            bitrate=Math.floor(bitrate*SIZE_CAP*0.85/e.oversize);continue;
+            bitrate=nextBitrate(e.oversize);continue;
         }
         // Encoders can still overshoot, so an oversized file is re-encoded at a proportionally lower bitrate.
-        if(blob.size>SIZE_CAP){bitrate=Math.floor(bitrate*SIZE_CAP*0.85/blob.size);blob=null}
+        if(blob.size>SIZE_CAP){bitrate=nextBitrate(blob.size);blob=null}
     }
     if(!blob)return{tooBig:true,limit:SIZE_CAP};
     return{blob,width:W,height:H,seconds:total/fps,moves,movesPerFrame:perFrame,codec:slow?'wasm':cfg.codec,slow,bitrate,segments:parallel?2:1};
