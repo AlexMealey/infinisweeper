@@ -4,8 +4,7 @@ FROM php:8.3-apache
 RUN mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini"
 
 COPY docker/apache.conf /etc/apache2/conf-available/infinisweeper.conf
-COPY docker/tls.conf /etc/apache2/sites-available/infinisweeper-tls.conf
-RUN a2enconf infinisweeper && a2enmod ssl && a2ensite infinisweeper-tls
+RUN a2enconf infinisweeper
 
 WORKDIR /var/www/html
 
@@ -27,10 +26,8 @@ RUN find . -type d -exec chmod 755 {} + \
 
 # Multiplayer room saves. Bind-mount this to the host to keep them across rebuilds.
 VOLUME /var/www/html/data/rooms
-# HTTPS certificate, outside the web root. Bind-mount it so rebuilds keep the same certificate.
-VOLUME /var/lib/infinisweeper/tls
 
-EXPOSE 80 443
+EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -fsS -o /dev/null http://localhost/ || exit 1

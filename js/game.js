@@ -2,7 +2,9 @@
 // All items assigned to window so Babel-compiled component scripts can access them.
 
 window.NB=[[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
-window.VIEWS={Small:{w:500,h:400},Medium:{w:800,h:600},Large:{w:1100,h:750}};
+// Board sizes in windowed mode, as shares of the window: in a 1920×1080 one, Small is 800×600 and Medium
+// 1100×750. Any CSS length works; the board measures its container.
+window.VIEWS={Small:{w:'45vw',h:'60vh'},Medium:{w:'60vw',h:'70vh'},Large:{w:'85vw',h:'85vh'}};
 window.ZMIN=16;window.ZMAX=64;window.ZDEF=36;window.ZSTEP=4;
 window.FLAG_STATES=new Set(['flag','quest','flag-ok','flag-bad']);
 window.N_COLORS={1:'#5b9bd5',2:'#6bab42',3:'#ef4444',4:'#a855f7',5:'#7f1d1d',6:'#06b6d4',7:'#d4d4d4',8:'#9ca3af'};
@@ -75,12 +77,15 @@ window.drawCellToCanvas=function(ctx,st,dx,dy,sz){
     else{let g=ctx.createLinearGradient(dx,dy,dx+sz,dy+sz);g.addColorStop(0,'#38385a');g.addColorStop(1,'#2c2c4a');ctx.fillStyle=g;ctx.fillRect(dx,dy,sz,sz)}
     ctx.strokeRect(dx,dy,sz,sz)
 };
-window.drawFooterHUD=function(ctx,canvasW,canvasH,footerH,move,total,cleared,flagged){
+// stamp (optional) is stacked under the move counter; callers from older builds leave it out.
+window.drawFooterHUD=function(ctx,canvasW,canvasH,footerH,move,total,cleared,flagged,stamp){
     ctx.fillStyle='#111128';ctx.fillRect(0,canvasH-footerH,canvasW,footerH);
     ctx.strokeStyle='#2a2a4a';ctx.lineWidth=Math.max(1,Math.round(footerH/48));ctx.strokeRect(0,canvasH-footerH,canvasW,footerH);
     const fs=Math.round(footerH*0.3),emojiFs=Math.round(footerH*0.35);ctx.textBaseline='middle';
     const cy=canvasH-footerH/2;let ox=footerH*0.4;
     const draw=(label,icon,val)=>{ctx.textAlign='left';ctx.fillStyle='#aaa';ctx.font=`bold ${fs}px sans-serif`;ctx.fillText(label,ox,cy);ox+=ctx.measureText(label).width+footerH*0.1;ctx.font=`${emojiFs}px serif`;ctx.fillText(icon,ox,cy);ox+=footerH*0.45;ctx.fillStyle='#fff';ctx.font=`bold ${fs}px sans-serif`;const s=String(val);ctx.fillText(s,ox,cy);ox+=ctx.measureText(s).width+footerH*0.5};
     draw('Flagged:','🚩',flagged);draw('Moves:','👆',move);draw('Cleared:','🟦',cleared);
-    ctx.fillStyle='#888';ctx.font=`bold ${fs}px sans-serif`;ctx.textAlign='right';ctx.fillText(`${move} / ${total}`,canvasW-footerH*0.4,cy)
+    ctx.fillStyle='#888';ctx.textAlign='right';const rx=canvasW-footerH*0.4;
+    if(stamp){ctx.font=`bold ${Math.round(footerH*0.24)}px sans-serif`;ctx.fillText(`${move} / ${total}`,rx,cy-footerH*0.18);ctx.fillText(stamp,rx,cy+footerH*0.18)}
+    else{ctx.font=`bold ${fs}px sans-serif`;ctx.fillText(`${move} / ${total}`,rx,cy)}
 };

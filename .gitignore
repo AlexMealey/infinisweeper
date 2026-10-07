@@ -1,9 +1,6 @@
 # Runtime multiplayer room saves (bind-mounted into the container)
 data/rooms/*.json
 
-# HTTPS certificate and private key (bind-mounted into the container)
-data/tls/
-
 # Local compose overrides, e.g. PORT=9000
 .env
 MULTIPLAYER_PLAN.md

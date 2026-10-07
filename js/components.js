@@ -117,7 +117,7 @@ window.SettingsModal=function SettingsModal({hints,setHints,uiSettings,setUiSett
                 <div style={{display:'flex',alignItems:'center',gap:8,padding:'2px 0'}}>
                     <span style={{color:'#aaa',fontSize:12,minWidth:82}}>Timelapse speed</span>
                     <select className="hs" value={String(uiSettings.tlMovesPerFrame||1)} onChange={e=>setUiSettings(u=>({...u,tlMovesPerFrame:+e.target.value}))}>
-                        {[1,2,4,8,16].map(n=><option key={n} value={n}>{n===1?'1 move':`${n} moves`} per frame</option>)}
+                        {[1,2,4,8,16,32].map(n=><option key={n} value={n}>{n===1?'1 move':`${n} moves`} per frame</option>)}
                     </select>
                     <select className="hs" value={String(uiSettings.tlFps||60)} onChange={e=>setUiSettings(u=>({...u,tlFps:+e.target.value}))}>
                         <option value="30">30 fps</option><option value="60">60 fps</option>
@@ -204,36 +204,13 @@ window.LeaderboardDropdown=function LeaderboardDropdown({entries,currentScore}){
 };
 
 // Progress for image and timelapse exports. Updates arrive through task.progress (a tiny store) instead of
-// props, so an export ticking away doesn't re-render the whole board. A long timelapse first shows task.plan:
-// a speed picker with the video length for each choice.
-window.ExportProgressModal=function ExportProgressModal({task}){
+// props, so an export ticking away doesn't re-render the whole board.
+function useExportProgress(task){
     const[p,setP]=useState(task.progress.get());
-    const[speed,setSpeed]=useState(task.plan?task.plan.movesPerFrame:1);
     const[,setTick]=useState(0);
     const phaseStart=useRef(null);
     useEffect(()=>task.progress.sub(setP),[task.progress]);
     useEffect(()=>{const t=setInterval(()=>setTick(n=>n+1),500);return()=>clearInterval(t)},[]);
-    const fmt=sec=>{const t=Math.max(0,Math.round(sec)),h=Math.floor(t/3600),m=Math.floor(t/60)%60,s=String(t%60).padStart(2,'0');return h?`${h}:${String(m).padStart(2,'0')}:${s}`:`${m}:${s}`};
-    const panel={minWidth:340,maxWidth:460,padding:'16px 20px',gap:10};
-    const plan=task.plan;
-    if(plan){
-        const len=n=>fmt((Math.ceil(plan.moves/n)+plan.fps)/plan.fps);
-        return(<div className="modal-overlay"><div className="modal-panel" style={panel}>
-            <h2 style={{fontSize:16,margin:0}}>🎬 Long timelapse</h2>
-            <div style={{color:'#9ca3af',fontSize:12,textAlign:'center'}}>{plan.moves.toLocaleString()} moves · {plan.width}×{plan.height} · {plan.fps} fps</div>
-            <div style={{color:'#ccc',fontSize:12}}>More moves per frame gives a shorter video that also exports faster.</div>
-            <div style={{display:'flex',flexDirection:'column',gap:2}}>
-                {[1,2,4,8,16].map(n=><label key={n} style={{display:'flex',alignItems:'center',gap:8,padding:'3px 6px',borderRadius:5,cursor:'pointer',background:speed===n?'#2a2a55':'transparent',color:'#ddd',fontSize:13}}>
-                    <input type="radio" name="tl-speed" checked={speed===n} onChange={()=>setSpeed(n)}/>
-                    {n===1?'1 move':`${n} moves`} per frame<span style={{marginLeft:'auto',color:'#9ca3af'}}>{len(n)}</span>
-                </label>)}
-            </div>
-            <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
-                <button onClick={task.cancel}>Cancel</button>
-                <button className="primary" onClick={()=>task.start(speed)}>Start export</button>
-            </div>
-        </div></div>);
-    }
     const video=task.kind==='video';
     const frac=p.phase==='estimate'?null:video?(p.total?Math.min(1,p.done/p.total):0):(p.done||0);
     if(!phaseStart.current||phaseStart.current.phase!==p.phase)phaseStart.current={phase:p.phase,t:Date.now(),frac:frac||0};
@@ -246,19 +223,76 @@ window.ExportProgressModal=function ExportProgressModal({task}){
         :p.phase==='retry'?'Re-encoding to stay under 50 MB…'
         :'Finishing the file…';
     const detail=video&&(p.phase==='encode'||p.phase==='retry')&&p.total?`Frame ${p.done.toLocaleString()} of ${p.total.toLocaleString()}`:video&&p.phase==='prepare'&&p.total?`${p.done.toLocaleString()} of ${p.total.toLocaleString()} moves`:'';
-    return(<div className="modal-overlay"><div className="modal-panel" style={panel}>
-        <h2 style={{fontSize:16,margin:0}}>{video?'🎬':'🖼'} {task.title}</h2>
-        <div style={{color:'#ccc',fontSize:13}}>{label}</div>
-        <div style={{height:8,background:'#2a2a4a',borderRadius:4,overflow:'hidden'}}>
-            <div style={{height:'100%',width:frac===null?'100%':`${Math.round(frac*100)}%`,background:'#6366f1',opacity:frac===null?0.35:1,transition:'width .2s'}}/>
+    return{video,frac,label,detail,elapsed:(Date.now()-task.startedAt)/1000,eta};
+}
+const fmtClock=sec=>{const t=Math.max(0,Math.round(sec)),h=Math.floor(t/3600),m=Math.floor(t/60)%60,s=String(t%60).padStart(2,'0');return h?`${h}:${String(m).padStart(2,'0')}:${s}`:`${m}:${s}`};
+const ProgressBar=({frac,height})=><div style={{height,background:'#2a2a4a',borderRadius:height/2,overflow:'hidden'}}>
+    <div style={{height:'100%',width:frac===null?'100%':`${Math.round(frac*100)}%`,background:'#6366f1',opacity:frac===null?0.35:1,transition:'width .2s'}}/>
+</div>;
+
+// The running export as a toast in the top-right stack, so the game stays usable meanwhile.
+// task.result, once set, is the finished message, shown briefly before the toast goes.
+window.ExportProgressToast=function ExportProgressToast({task}){
+    const s=useExportProgress(task);
+    if(task.result)return(<div className="toast" style={{width:300,borderLeftColor:task.result.ok?'#22c55e':'#f87171'}}>
+        <div className="toast-title">{task.result.ok?'✅':'⚠️'} {task.result.title}</div>
+        {task.result.text&&<div className="toast-sub">{task.result.text}</div>}
+    </div>);
+    return(<div className="toast" style={{width:300}}>
+        <div className="toast-title">{s.video?'🎬':'🖼'} {task.title}</div>
+        <div className="toast-sub">{s.label}</div>
+        <div style={{margin:'8px 0 6px'}}><ProgressBar frac={s.frac} height={6}/></div>
+        <div className="toast-sub" style={{display:'flex',justifyContent:'space-between',flexWrap:'wrap',gap:'0 10px',marginTop:0}}>
+            <span>{s.detail}{s.detail&&s.frac!==null?' · ':''}{s.frac!==null?`${Math.floor(s.frac*100)}%`:''}</span>
+            <span>{fmtClock(s.elapsed)}{s.eta!==null?` · ${fmtClock(s.eta)} left`:''}</span>
         </div>
+        <div className="toast-actions" style={{justifyContent:'flex-end'}}><button onClick={task.cancel}>Cancel</button></div>
+    </div>);
+};
+
+// A long timelapse first shows task.plan: a speed picker with the video length for each choice. Progress itself
+// shows here only if ExportProgressToast can't (an older app.js).
+window.ExportProgressModal=function ExportProgressModal({task}){
+    const[speed,setSpeed]=useState(task.plan?task.plan.movesPerFrame:1);
+    const panel={minWidth:340,maxWidth:460,padding:'16px 20px',gap:10};
+    const plan=task.plan;
+    if(plan){
+        const speeds=Array.isArray(plan.speeds)?plan.speeds:[1,2,4,8,16];
+        const frames=n=>Math.ceil(plan.moves/n)+plan.fps,len=n=>fmtClock(frames(n)/plan.fps);
+        // With the WebAssembly encoder (plain http://) exporting is the slow part, so estimate that too.
+        const took=n=>{const sec=frames(n)*plan.msPerFrame/1000;return sec<90?`${Math.max(1,Math.round(sec))} s`:`${Math.round(sec/60)} min`};
+        return(<div className="modal-overlay"><div className="modal-panel" style={panel}>
+            <h2 style={{fontSize:16,margin:0}}>🎬 Long timelapse</h2>
+            <div style={{color:'#9ca3af',fontSize:12,textAlign:'center'}}>{plan.moves.toLocaleString()} moves · {plan.width}×{plan.height} · {plan.fps} fps</div>
+            <div style={{color:'#ccc',fontSize:12}}>More moves per frame gives a shorter video that also exports faster.</div>
+            {plan.slow&&<div style={{color:'#fbbf24',fontSize:12}}>Browsers switch their video encoder off on plain http:// pages, so a slower built-in one is used here.</div>}
+            <div style={{display:'flex',flexDirection:'column',gap:2}}>
+                {speeds.map(n=><label key={n} style={{display:'flex',alignItems:'center',gap:8,padding:'3px 6px',borderRadius:5,cursor:'pointer',background:speed===n?'#2a2a55':'transparent',color:'#ddd',fontSize:13}}>
+                    <input type="radio" name="tl-speed" checked={speed===n} onChange={()=>setSpeed(n)}/>
+                    {n===1?'1 move':`${n} moves`} per frame<span style={{marginLeft:'auto',color:'#9ca3af'}}>{len(n)}{plan.slow?` · about ${took(n)} to export`:''}</span>
+                </label>)}
+            </div>
+            <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+                <button onClick={task.cancel}>Cancel</button>
+                <button className="primary" onClick={()=>task.start(speed)}>Start export</button>
+            </div>
+        </div></div>);
+    }
+    return <ExportProgressPanel task={task} panel={panel}/>;
+};
+function ExportProgressPanel({task,panel}){
+    const s=useExportProgress(task);
+    return(<div className="modal-overlay"><div className="modal-panel" style={panel}>
+        <h2 style={{fontSize:16,margin:0}}>{s.video?'🎬':'🖼'} {task.title}</h2>
+        <div style={{color:'#ccc',fontSize:13}}>{s.label}</div>
+        <ProgressBar frac={s.frac} height={8}/>
         <div style={{display:'flex',justifyContent:'space-between',flexWrap:'wrap',gap:'2px 16px',color:'#9ca3af',fontSize:12}}>
-            <span>{detail}{detail&&frac!==null?' · ':''}{frac!==null?`${Math.floor(frac*100)}%`:''}</span>
-            <span>{fmt((Date.now()-task.startedAt)/1000)} elapsed{eta!==null?` · about ${fmt(eta)} left`:''}</span>
+            <span>{s.detail}{s.detail&&s.frac!==null?' · ':''}{s.frac!==null?`${Math.floor(s.frac*100)}%`:''}</span>
+            <span>{fmtClock(s.elapsed)} elapsed{s.eta!==null?` · about ${fmtClock(s.eta)} left`:''}</span>
         </div>
         <div style={{display:'flex',justifyContent:'flex-end'}}><button onClick={task.cancel}>Cancel</button></div>
     </div></div>);
-};
+}
 
 window.GameOverModal=function GameOverModal({undoAvailable,undoInfinite,undoStack,undoStackCount,onUndo,onRestart,onNewSeed,onExportImage,onExportVideo,onClose,videoExporting,leaderboard,lastEntryDate,killerName,killerIsSelf}){
     const[closeLockSecs,setCloseLockSecs]=useState(5);
@@ -471,10 +505,11 @@ window.CursorOverlay=function CursorOverlay({players,selfId,viewX,viewY,cellSize
 // Top-right stack of room notifications: the start-over vote (while open or just resolved) and
 // short-lived notices like "Alex used an undo", so board changes made by others don't come out of
 // nowhere. Sits above modals, since the game-over modal may be open for everyone when a vote starts.
-window.ToastStack=function ToastStack({toasts,vote,selfId,onVote}){
-    if(!vote&&!toasts.length)return null;
+window.ToastStack=function ToastStack({toasts,vote,selfId,onVote,children}){
+    if(!vote&&!toasts.length&&!children)return null;
     return(
         <div className="toast-stack">
+            {children}
             {vote&&<ResetVoteToast key={vote.id} vote={vote} selfId={selfId} onVote={onVote}/>}
             {toasts.map(t=><div key={t.id} className="toast">{t.text}</div>)}
         </div>
