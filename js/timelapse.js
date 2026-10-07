@@ -135,28 +135,27 @@ function frameBuffers(W,H){
 // its largest value, so labels don't shift as the numbers grow, and everything shrinks together if the frame is
 // too narrow. Per frame only numbers that changed are redrawn, from glyphs rendered once, straight into the
 // frame: drawing the HUD on a canvas and reading it back every frame took most of the export time.
-function makeFooter(buf,W,top,fh,{moves,maxCleared,maxFlagged,stamp}){
+function makeFooter(buf,W,top,fh,{moves,maxCleared,maxFlagged}){
     const c=document.createElement('canvas');c.width=W;c.height=fh;
     const ctx=c.getContext('2d',{willReadFrequently:true});
     const groups=[['Flagged:','🚩',maxFlagged],['Moves:','👆',moves],['Cleared:','🟦',maxCleared]];
     const counterMax=`${moves} / ${moves}`,digits=v=>String(Math.max(0,v)).length;
     const layout=k=>{
-        const fs=Math.round(fh*0.3*k),font=`bold ${fs}px sans-serif`,cfs=stamp?Math.round(fh*0.24*k):fs,cfont=`bold ${cfs}px sans-serif`;
+        const fs=Math.round(fh*0.3*k),font=`bold ${fs}px sans-serif`;
         ctx.font=font;let digitW=0;for(let d=0;d<10;d++)digitW=Math.max(digitW,ctx.measureText(String(d)).width);
         let x=fh*0.4;const slots=[];
         for(const[label,,max]of groups){const lx=x;x+=ctx.measureText(label).width+fh*0.1*k;const ex=x;x+=fh*0.45*k;slots.push({lx,ex,x,w:digits(max)*digitW});x+=digits(max)*digitW+fh*0.5*k}
-        ctx.font=cfont;const right=Math.max(ctx.measureText(counterMax).width,stamp?ctx.measureText(stamp).width:0);
-        return{k,fs,font,cfs,cfont,slots,need:x+right+fh*0.4};
+        const right=ctx.measureText(counterMax).width;
+        return{k,font,slots,need:x+right+fh*0.4};
     };
     let L=layout(1);
     for(let k=0.95;L.need>W&&k>0.4;k-=0.05)L=layout(k);
-    const rx=W-fh*0.4,cy=fh/2,ccy=stamp?cy-fh*0.18:cy;
-    // The parts that never change: background, border, labels, icons and the timestamp.
+    const rx=W-fh*0.4,cy=fh/2;
+    // The parts that never change: background, border, labels and icons.
     ctx.fillStyle='#111128';ctx.fillRect(0,0,W,fh);
     ctx.strokeStyle='#2a2a4a';ctx.lineWidth=Math.max(1,Math.round(fh/48));ctx.strokeRect(0,0,W,fh);
     ctx.textBaseline='middle';ctx.textAlign='left';
     groups.forEach(([label,icon],i)=>{const s=L.slots[i];ctx.fillStyle='#aaa';ctx.font=L.font;ctx.fillText(label,s.lx,cy);ctx.font=`${Math.round(fh*0.35*L.k)}px serif`;ctx.fillText(icon,s.ex,cy)});
-    if(stamp){ctx.fillStyle='#888';ctx.font=L.cfont;ctx.textAlign='right';ctx.fillText(stamp,rx,cy+fh*0.18)}
     const base=ctx.getImageData(0,0,W,fh).data;
     // Glyph coverage masks, cut to the rows that have ink. G pads each side for antialiasing that spills past the advance.
     const G=3;
@@ -172,7 +171,7 @@ function makeFooter(buf,W,top,fh,{moves,maxCleared,maxFlagged,stamp}){
         }
         return set;
     };
-    const vals=glyphs(L.font,cy,'0123456789',[255,255,255]),cnt=glyphs(L.cfont,ccy,'0123456789 /',[136,136,136]);
+    const vals=glyphs(L.font,cy,'0123456789',[255,255,255]),cnt=glyphs(L.font,cy,'0123456789 /',[136,136,136]);
     const textW=(set,s)=>{let w=0;for(const ch of s)w+=set.g[ch].adv;return w};
     // Each slot is restored from the static footer, its text blended in, and its rectangle converted to YUV.
     const draw=(set,s,x0,x1,penX)=>{
@@ -336,7 +335,7 @@ async function wasmSink(bitrate,W,H,fps,level,buf){
 }
 
 // src: {seed, moveLog, wrongFlags} or {frames} (version 1 saves).
-// opts: {fps: 30|60, movesPerFrame: 1|2|4|8|16|32, res: 'auto'|'720'|'1080'|'1440'|'2160', stamp?: text shown in the footer}.
+// opts: {fps: 30|60, movesPerFrame: 1|2|4|8|16|32, res: 'auto'|'720'|'1080'|'1440'|'2160'}.
 // hooks.confirmPlan(plan) may return (or resolve to) false to cancel, or {movesPerFrame} to change speed.
 // hooks.onProgress({phase: 'prepare'|'encode'|'retry'|'finish', done, total}) is called at most every 100ms.
 // Resolves to {blob, ...}, {empty: true}, {tooBig: true, limit} if it can't get under SIZE_CAP, or null when cancelled.
@@ -344,7 +343,7 @@ async function wasmSink(bitrate,W,H,fps,level,buf){
 async function render(src,opts,hooks={}){
     const fps=+opts.fps===30?30:60;
     let perFrame=SPEEDS.includes(+opts.movesPerFrame)?+opts.movesPerFrame:1;
-    const res=BUDGETS[opts.res]?opts.res:'auto',stamp=typeof opts.stamp==='string'?opts.stamp:'',signal=hooks.signal,ABORT={};
+    const res=BUDGETS[opts.res]?opts.res:'auto',signal=hooks.signal,ABORT={};
     let lastReport=0;
     const report=(phase,done,total,force)=>{const t=performance.now();if(hooks.onProgress&&(force||t-lastReport>100)){lastReport=t;hooks.onProgress({phase,done,total})}};
     const checkAbort=()=>{if(signal&&signal.aborted)throw ABORT};
@@ -419,7 +418,7 @@ async function render(src,opts,hooks={}){
             };
         }
         convert(0,0,W,areaH);
-        b.footer=makeFooter(buf,W,areaH,p.footerH,{moves,maxCleared,maxFlagged,stamp});
+        b.footer=makeFooter(buf,W,areaH,p.footerH,{moves,maxCleared,maxFlagged});
         return b;
     };
 

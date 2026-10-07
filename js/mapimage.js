@@ -47,11 +47,6 @@ function drawFooter(ctx,W,fh,stats){
         ctx.font=`${emojiFs}px serif`;ctx.fillText(i,ox,cy);ox+=fh*0.45;
         ctx.fillStyle='#fff';ctx.font=`bold ${fs}px sans-serif`;ctx.fillText(v,ox,cy);ox+=ctx.measureText(v).width+fh*0.6};
     draw('Mines Flagged:','🚩',String(stats.flags));draw('Moves Made:','👆',String(stats.moves));draw('Squares Cleared:','🟦',String(stats.cleared));
-    // Right-aligned; shrinks to fit beside the stats on narrow boards, and is left out if that would make it tiny.
-    if(stats.stamp){
-        const rx=W-fh*0.4;ctx.font=`bold ${fs}px sans-serif`;const k=Math.min(1,(rx-ox)/ctx.measureText(stats.stamp).width);
-        if(k>=0.5){ctx.fillStyle='#888';ctx.font=`bold ${Math.floor(fs*k)}px sans-serif`;ctx.textAlign='right';ctx.fillText(stats.stamp,rx,cy)}
-    }
 }
 // Drawn in vertical slices so no canvas exceeds ~4MP (iOS refuses canvases over 16MP); onSlice(rgba,x0,w) gets each one.
 function renderFooter(W,fh,stats,onSlice){
