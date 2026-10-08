@@ -1,4 +1,4 @@
-const CACHE_NAME = 'infinisweeper-v23';
+const CACHE_NAME = 'infinisweeper-v24';
 
 const CDN_TO_LOCAL = {
   'https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js': './lib/react.production.min.js',
@@ -49,17 +49,13 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   const url = event.request.url;
 
-  // Multiplayer endpoints must ALWAYS hit the network — never serve stale sync
-  // responses from cache, and don't try to cache them (they're user-specific
-  // and change on every request).
-  if (url.includes('/php/')) {
-    return; // let the browser handle it normally
-  }
+  // Multiplayer endpoints always go to the network, uncached.
+  if (url.includes('/php/')) return;
 
   const isCDN = url in CDN_TO_LOCAL;
 
   if (isCDN) {
-    // Network-first for CDN resources; fall back to cached CDN response, then local lib
+    // Network first for CDN files, then the cached copy, then the local lib/ copy.
     event.respondWith(
       fetch(event.request)
         .then(response => {
@@ -74,13 +70,12 @@ self.addEventListener('fetch', event => {
           console.error('SW CDN fetch failed, using cache:', url, err);
           return caches.match(event.request).then(cached => {
             if (cached) return cached;
-            // Fall back to local lib file
             return caches.match(new Request(CDN_TO_LOCAL[url]));
           });
         })
     );
   } else {
-    // Cache-first for local files
+    // Cache first for our own files.
     event.respondWith(
       caches.match(event.request).then(cached => {
         if (cached) return cached;

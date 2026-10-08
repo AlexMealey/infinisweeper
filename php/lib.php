@@ -1,48 +1,43 @@
 <?php
-// lib.php — shared helpers for the multiplayer endpoints.
-// Kept tiny on purpose: any shared hosting with plain PHP-FPM can run this.
+// lib.php – shared helpers for the multiplayer endpoints. Plain PHP, so any shared host can run it.
 
-const PLAYER_STALE_SEC = 30;   // drop a player's cursor if we haven't heard from them in this many seconds
-const ROOM_TTL_SEC     = 86400; // delete rooms untouched for 24 hours
-const MAX_NAME_LEN     = 24;
-const MAX_MOVES_PER_REQ = 50;
-const RATE_TOKENS_CAP  = 20;   // burst allowance per player
-const RATE_TOKENS_PER_SEC = 12; // refill rate — above the client's max of 10/sec (clicks send at most every 100ms)
-const VOTE_PASS_PCT    = 51;   // share of players in the room who must agree to start over
-const VOTE_TTL_SEC     = 30;   // an unresolved start-over vote expires after this long
-const VOTE_RESULT_SEC  = 4;    // resolved votes stay visible this long so every client can show the outcome
-const EVENT_KEEP       = 20;   // recent room events kept for clients to announce ("Alex used an undo")
-const EVENT_SHOW_SEC   = 10;   // only events this recent are sent; clients dedupe by seq
-const MAX_LOADED_LOG   = 2000000; // chars — cap on a save file's move log loaded into a room
+const PLAYER_STALE_SEC     = 30;      // players unheard from for this long are dropped
+const ROOM_TTL_SEC         = 86400;   // rooms untouched for this long are deleted
+const MAX_NAME_LEN         = 24;
+const MAX_MOVES_PER_REQ    = 50;
+const RATE_TOKENS_CAP      = 20;      // burst allowance per player
+const RATE_TOKENS_PER_SEC  = 12;      // above the client's maximum of 10 requests a second
+const VOTE_PASS_PCT        = 51;      // share of the room that must agree to start over
+const VOTE_TTL_SEC         = 30;      // an unresolved vote expires after this long
+const VOTE_RESULT_SEC      = 4;       // a resolved vote stays visible this long, so every client can show it
+const EVENTS_KEPT          = 20;      // recent events for clients to announce ("Alex used an undo")
+const EVENT_SEND_SEC       = 10;      // only events this recent are sent
+const MAX_LOADED_LOG_CHARS = 2000000; // a save file's move log loaded into a room
 
-function data_dir(): string {
+function rooms_dir(): string {
     $dir = __DIR__ . '/../data/rooms';
     if (!is_dir($dir)) @mkdir($dir, 0775, true);
     return $dir;
 }
 
+// $roomId must already have passed is_valid_id().
 function room_path(string $roomId): string {
-    // room IDs are validated to hex chars only before reaching here
-    return data_dir() . '/' . $roomId . '.json';
+    return rooms_dir() . '/' . $roomId . '.json';
 }
 
-function gen_id(int $bytes = 16): string {
+function random_hex_id(int $bytes = 16): string {
     return bin2hex(random_bytes($bytes));
 }
 
 function sanitize_name(string $n): string {
     $n = trim(strip_tags($n));
     if ($n === '') $n = 'Player';
-    // Prefer mbstring so multibyte characters (accents, emoji) count as one glyph
-    // and get truncated on codepoint boundaries. Falls back to plain byte truncation
-    // when the extension isn't enabled — worst case the display name loses a byte
-    // or two off the tail, but nothing errors out.
+    // mbstring truncates on character boundaries. Without it, cut bytes and drop any partial UTF-8 character.
     if (function_exists('mb_strlen')) {
         if (mb_strlen($n, 'UTF-8') > MAX_NAME_LEN) $n = mb_substr($n, 0, MAX_NAME_LEN, 'UTF-8');
     } else {
         if (strlen($n) > MAX_NAME_LEN) {
             $n = substr($n, 0, MAX_NAME_LEN);
-            // Trim any dangling UTF-8 continuation byte so we don't produce broken JSON.
             while (strlen($n) > 0 && (ord($n[strlen($n) - 1]) & 0xC0) === 0x80) {
                 $n = substr($n, 0, -1);
             }
@@ -55,7 +50,7 @@ function sanitize_seed(string $s): string {
     return preg_replace('/[^A-Za-z0-9_-]/', '', substr($s, 0, 32));
 }
 
-// Deterministic color from name so a returning player keeps the same badge color.
+// The same name always gets the same colour.
 function color_from_name(string $name): string {
     $palette = ['#5b9bd5','#6bab42','#ef4444','#a855f7','#06b6d4','#f59e0b','#ec4899','#10b981'];
     $h = 0;
@@ -63,40 +58,37 @@ function color_from_name(string $name): string {
     return $palette[$h % count($palette)];
 }
 
-function valid_id(string $id): bool {
+function is_valid_id(string $id): bool {
     return (bool) preg_match('/^[a-f0-9]{16,64}$/', $id);
 }
 
-// Load a room with an exclusive lock held for the duration of the caller's scope.
-// Returns [data, lockHandle]. Caller must call save_room_and_unlock or unlock_room.
+// Returns [room, lock], with the room file locked until save_room_and_unlock() or unlock_room().
 function load_room_locked(string $roomId) {
-    if (!valid_id($roomId)) return [null, null];
+    if (!is_valid_id($roomId)) return [null, null];
     $path = room_path($roomId);
     if (!file_exists($path)) return [null, null];
-    $fh = fopen($path, 'c+');
-    if (!$fh) return [null, null];
-    flock($fh, LOCK_EX);
-    $raw = stream_get_contents($fh);
-    $data = json_decode($raw, true);
-    if (!is_array($data)) { flock($fh, LOCK_UN); fclose($fh); return [null, null]; }
-    return [$data, $fh];
+    $lock = fopen($path, 'c+');
+    if (!$lock) return [null, null];
+    flock($lock, LOCK_EX);
+    $room = json_decode(stream_get_contents($lock), true);
+    if (!is_array($room)) { flock($lock, LOCK_UN); fclose($lock); return [null, null]; }
+    return [$room, $lock];
 }
 
-function save_room_and_unlock(array $data, $fh): void {
-    ftruncate($fh, 0);
-    rewind($fh);
-    fwrite($fh, json_encode($data, JSON_UNESCAPED_SLASHES));
-    fflush($fh);
-    flock($fh, LOCK_UN);
-    fclose($fh);
+function save_room_and_unlock(array $room, $lock): void {
+    ftruncate($lock, 0);
+    rewind($lock);
+    fwrite($lock, json_encode($room, JSON_UNESCAPED_SLASHES));
+    fflush($lock);
+    flock($lock, LOCK_UN);
+    fclose($lock);
 }
 
-function unlock_room($fh): void {
-    if ($fh) { flock($fh, LOCK_UN); fclose($fh); }
+function unlock_room($lock): void {
+    if ($lock) { flock($lock, LOCK_UN); fclose($lock); }
 }
 
-// Fresh room skeleton. hints defaults match the client's migrateHints().
-// $founderId is the creator's playerId: they can start over without a vote.
+// Hint defaults match the client's migrateHints(). The founder can start over without a vote.
 function new_room_state(string $seed, ?array $hints, string $founderId): array {
     $defaultHints = [
         'wrongFlags'      => false,
@@ -107,27 +99,22 @@ function new_room_state(string $seed, ?array $hints, string $founderId): array {
     ];
     return [
         'version'      => 0,
-        'logRevision'  => 0,           // bumped whenever a past moveLog entry is rewritten (undo).
-                                       // Clients compare against their last-seen value to know when
-                                       // an incremental tail-delta is insufficient and they must
-                                       // rebuild from the full moveLog instead.
+        'logRevision'  => 0,           // bumps when an undo rewrites the log, so clients refetch it whole
         'seed'         => $seed,
         'hints'        => array_merge($defaultHints, $hints ?? []),
         'moveLog'      => '',
         'moveOwners'   => '',
         'players'      => new stdClass(),
         'founderId'    => $founderId,
-        'round'        => 0,           // bumped every time the room starts over; clients drop stale-round moves
-        'resetVote'    => null,        // open or recently resolved start-over vote, see tally_reset_vote()
+        'round'        => 0,           // bumps when the room starts over
+        'resetVote'    => null,        // see resolve_reset_vote()
         'createdAt'    => time(),
         'lastActivity' => time(),
     ];
 }
 
-// Token-bucket rate limit per player. State lives inside the player record so it
-// costs no extra I/O — it's already loaded and saved by the sync flow.
-// Returns true if allowed, false if the player has spent their burst allowance.
-function check_and_consume_rate(array &$player): bool {
+// Token-bucket rate limit, kept in the player record. Returns false once the burst allowance is spent.
+function take_rate_token(array &$player): bool {
     $now = microtime(true);
     $tokens = isset($player['rateTokens']) ? (float)$player['rateTokens'] : (float)RATE_TOKENS_CAP;
     $last   = isset($player['rateLastRefill']) ? (float)$player['rateLastRefill'] : $now;
@@ -142,7 +129,7 @@ function check_and_consume_rate(array &$player): bool {
     return true;
 }
 
-// Kick players we haven't heard from recently, so ghost cursors don't linger.
+// Drops players we haven't heard from recently, so their cursors don't linger.
 function prune_stale_players(array &$room): void {
     $cutoff = time() - PLAYER_STALE_SEC;
     if (!isset($room['players']) || !is_array($room['players'])) return;
@@ -153,37 +140,59 @@ function prune_stale_players(array &$room): void {
     }
 }
 
-// Same compact form as the client's encodeMoveLog: "r5,3;f5,4;u6,3;". Possessive quantifier so
-// PCRE keeps no backtracking state on long logs.
-function valid_move_log(string $log): bool {
-    return strlen($log) <= MAX_LOADED_LOG && preg_match('/^(?:[rfu]-?\d{1,9},-?\d{1,9};)*+$/D', $log) === 1;
+// Move logs use the client's encodeMoveLog() form: "r5,3;f5,4;u6,3;". The possessive quantifier keeps PCRE from
+// holding backtracking state on long logs.
+function is_valid_move_log(string $log): bool {
+    return strlen($log) <= MAX_LOADED_LOG_CHARS && preg_match('/^(?:[rfu]-?\d{1,9},-?\d{1,9};)*+$/D', $log) === 1;
 }
 
-// Start a fresh round. 'restart' keeps the seed, 'new' switches to $seed (or a random one), and
-// 'load' switches to a save file's $seed and $loadLog, credited to $owner (a short playerId).
-// Works on sync.php's move-log locals, which it persists at the end of the request.
-function reset_round(array &$room, string &$moveLog, string &$moveOwners, int &$logRev, string $kind, ?string $seed,
-                     string $loadLog = '', string $owner = ''): void {
+// One move log entry as [type, x, y], or null if it's malformed.
+function parse_move(string $entry): ?array {
+    if ($entry === '') return null;
+    $comma = strpos($entry, ',', 1);
+    if ($comma === false) return null;
+    return [$entry[0], (int)substr($entry, 1, $comma - 1), (int)substr($entry, $comma + 1)];
+}
+
+// Marks the latest reveal of (x, y), the one that hit a mine, as undone ('u'). Returns false if that reveal is
+// already undone: two players pressed Undo at once, and an older, safe reveal of the cell must not be undone too.
+function undo_reveal(string &$moveLog, int $x, int $y): bool {
+    $entries = $moveLog === '' ? [] : explode(';', rtrim($moveLog, ';'));
+    for ($j = count($entries) - 1; $j >= 0; $j--) {
+        $move = parse_move($entries[$j]);
+        if ($move === null || ($move[0] !== 'r' && $move[0] !== 'u')) continue;
+        if ($move[1] !== $x || $move[2] !== $y) continue;
+        if ($move[0] === 'u') return false;
+        $entries[$j] = 'u' . $x . ',' . $y; // its owner stays the player who made the reveal
+        $moveLog = implode(';', $entries) . ';';
+        return true;
+    }
+    return false;
+}
+
+// Starts a fresh round. 'restart' keeps the seed, 'new' switches to $seed (or a random one), and 'load' takes a
+// save file's $seed and $loadLog, credited to $owner (a short playerId).
+function start_new_round(array &$room, string &$moveLog, string &$moveOwners, int &$logRevision, string $kind, ?string $seed,
+                         string $loadLog = '', string $owner = ''): void {
     if ($kind === 'new' || $kind === 'load') $room['seed'] = ($seed !== null && $seed !== '') ? $seed : bin2hex(random_bytes(4));
     $moveLog    = $kind === 'load' ? $loadLog : '';
     $moveOwners = $kind === 'load' ? str_repeat($owner . ';', substr_count($loadLog, ';')) : '';
-    $logRev++;                  // makes every client rebuild from the new full log
+    $logRevision++;             // every client rebuilds from the new log
     $room['round']     = (int)($room['round'] ?? 0) + 1;
     $room['resetVote'] = null;  // a reset settles any open vote
 }
 
-// Record something the other players should be told about, so the board doesn't just change under
-// them: 'undo', 'restart', 'new' or 'load'. Clients show each seq once.
+// Records something other players should be told about: 'undo', 'restart', 'new' or 'load'.
 function add_event(array &$room, string $type, string $playerId, string $name): void {
     $seq = (int)($room['eventSeq'] ?? 0) + 1;
     $room['eventSeq'] = $seq;
     $events   = $room['events'] ?? [];
     $events[] = ['seq' => $seq, 'type' => $type, 'by' => $playerId, 'byName' => $name, 'at' => time()];
-    $room['events'] = array_slice($events, -EVENT_KEEP);
+    $room['events'] = array_slice($events, -EVENTS_KEPT);
 }
 
 function recent_events(array $room): array {
-    $cutoff = time() - EVENT_SHOW_SEC;
+    $cutoff = time() - EVENT_SEND_SEC;
     $out = [];
     foreach ($room['events'] ?? [] as $e) {
         if ($e['at'] >= $cutoff) $out[] = ['seq' => $e['seq'], 'type' => $e['type'], 'by' => $e['by'], 'byName' => $e['byName']];
@@ -191,12 +200,11 @@ function recent_events(array $room): array {
     return $out;
 }
 
-function vote_needed(int $total): int {
+function votes_needed(int $total): int {
     return intdiv($total * VOTE_PASS_PCT + 99, 100); // ceil without floats: 2 players → 2, 3 → 2, 4 → 3
 }
 
-// Tally the reset vote against the players currently in the room. Votes from players who have
-// left don't count, and the lobby size shrinks with them. Returns [yes, no, total].
+// Returns [yes, no, total], counting only players still in the room.
 function count_votes(array $room): array {
     $players = $room['players'] ?? [];
     $yes = 0; $no = 0;
@@ -207,68 +215,63 @@ function count_votes(array $room): array {
     return [$yes, $no, max(1, count($players))];
 }
 
-// Resolve the open reset vote once it's decided. Returns 'passed' | 'failed' | 'expired', or null
-// while it's still open (or there's no vote). Resolved votes are cleared after VOTE_RESULT_SEC.
-function tally_reset_vote(array &$room): ?string {
-    $v = $room['resetVote'] ?? null;
-    if (!is_array($v)) return null;
-    if ($v['status'] !== 'open') {
-        if (time() - ($v['resolvedAt'] ?? 0) > VOTE_RESULT_SEC) $room['resetVote'] = null;
+// Returns 'passed', 'failed' or 'expired' when the open vote is decided, otherwise null. Clears resolved votes
+// after VOTE_RESULT_SEC.
+function resolve_reset_vote(array &$room): ?string {
+    $vote = $room['resetVote'] ?? null;
+    if (!is_array($vote)) return null;
+    if ($vote['status'] !== 'open') {
+        if (time() - ($vote['resolvedAt'] ?? 0) > VOTE_RESULT_SEC) $room['resetVote'] = null;
         return null;
     }
     [$yes, $no, $total] = count_votes($room);
-    $needed = vote_needed($total);
-    if ($yes >= $needed)                             $result = 'passed';
-    elseif ($total - $no < $needed)                  $result = 'failed'; // can no longer reach the threshold
-    elseif (time() - $v['createdAt'] > VOTE_TTL_SEC) $result = 'expired';
+    $needed = votes_needed($total);
+    if ($yes >= $needed)                                $result = 'passed';
+    elseif ($total - $no < $needed)                     $result = 'failed'; // can no longer pass
+    elseif (time() - $vote['createdAt'] > VOTE_TTL_SEC) $result = 'expired';
     else return null;
     $room['resetVote']['status']     = $result;
     $room['resetVote']['resolvedAt'] = time();
     return $result;
 }
 
-// What clients see of the reset vote: live tallies plus this player's own answer (true/false/null).
-function public_vote(array $room, string $playerId): ?array {
-    $v = $room['resetVote'] ?? null;
-    if (!is_array($v)) return null;
+// The vote as clients see it: live tallies, plus this player's own answer (true, false or null).
+function vote_for_client(array $room, string $playerId): ?array {
+    $vote = $room['resetVote'] ?? null;
+    if (!is_array($vote)) return null;
     [$yes, $no, $total] = count_votes($room);
     return [
-        'id'          => $v['id'],
-        'by'          => $v['by'],
-        'byName'      => $v['byName'] ?? 'Player',
-        'kind'        => $v['kind'],
-        'loadMoves'   => substr_count($v['moveLog'] ?? '', ';'), // size of the save, for 'load' votes
-        'status'      => $v['status'],
+        'id'          => $vote['id'],
+        'by'          => $vote['by'],
+        'byName'      => $vote['byName'] ?? 'Player',
+        'kind'        => $vote['kind'],
+        'loadMoves'   => substr_count($vote['moveLog'] ?? '', ';'),
+        'status'      => $vote['status'],
         'yes'         => $yes,
         'no'          => $no,
         'total'       => $total,
-        'needed'      => vote_needed($total),
-        'myVote'      => $v['votes'][$playerId] ?? null,
-        'secondsLeft' => max(0, VOTE_TTL_SEC - (time() - $v['createdAt'])),
+        'needed'      => votes_needed($total),
+        'myVote'      => $vote['votes'][$playerId] ?? null,
+        'secondsLeft' => max(0, VOTE_TTL_SEC - (time() - $vote['createdAt'])),
     ];
 }
 
-// Best-effort room GC. Called opportunistically from create-room.php; not on the hot path.
-function gc_rooms(): void {
-    $dir = data_dir();
+function delete_expired_rooms(): void {
     $cutoff = time() - ROOM_TTL_SEC;
-    foreach (glob($dir . '/*.json') as $f) {
+    foreach (glob(rooms_dir() . '/*.json') as $f) {
         if (filemtime($f) < $cutoff) @unlink($f);
     }
 }
 
 function read_json_body(): array {
-    $raw = file_get_contents('php://input');
-    $data = json_decode($raw, true);
+    $data = json_decode(file_get_contents('php://input'), true);
     return is_array($data) ? $data : [];
 }
 
 function json_response(array $data, int $code = 200): void {
     http_response_code($code);
     header('Content-Type: application/json');
-    // The client is served from the same origin as this PHP, so CORS is not
-    // strictly required. Emit it anyway so testing from a dev server on a
-    // different port doesn't hit CORS errors.
+    // The client is same-origin; CORS headers let a dev server on another port call it too.
     header('Access-Control-Allow-Origin: *');
     header('Access-Control-Allow-Methods: POST, OPTIONS');
     header('Access-Control-Allow-Headers: Content-Type');

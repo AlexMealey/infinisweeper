@@ -29,24 +29,21 @@
         onerror="this.onerror=null;this.href='lib/tailwind.min.css'"/>
   <link rel="stylesheet" href="css/style.css"/>
 
-  <!-- Game logic (no JSX, synchronous) -->
+  <!-- Plain JS, loaded in order: game rules, then the PNG (window.MapImage) and MP4 (window.Timelapse) exporters and multiplayer sync (window.Net) -->
   <script src="js/game.js"></script>
-  <!-- PNG export encoder (regular JS, exposes window.MapImage) -->
   <script src="js/mapimage.js"></script>
-  <!-- Streamed MP4 timelapse encoder (regular JS, exposes window.Timelapse) -->
   <script src="js/timelapse.js"></script>
-  <!-- Multiplayer transport (regular JS, exposes window.Net) -->
   <script src="js/net.js"></script>
 </head>
 <body>
 <div id="root"></div>
 
-<!-- React components and app (JSX, processed by Babel at runtime) -->
+<!-- React components and app (JSX, compiled by Babel in the browser) -->
 <script type="text/babel" src="js/components.js"></script>
 <script type="text/babel" src="js/app.js"></script>
 
 <script>
-  // Register service worker for PWA/offline support
+  // Service worker, for offline play
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', function() {
       navigator.serviceWorker.register('./sw.js')

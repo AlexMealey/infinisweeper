@@ -1,54 +1,40 @@
-// net.js — polling loop for the multiplayer sync endpoint.
-// Regular JS (no JSX), synchronous load, exposed on window.Net.
-//
-// Usage from the React layer:
-//   Net.start({roomId, playerId, name, onSync: ({newMoves, players, hints, seed}) => {...}})
-//   Net.sendMove(['r', 5, 3])   // called after a local move is applied; sent right away
-//   Net.pendingMoves()          // our moves the server hasn't taken yet
-//   Net.sendCursor(worldX, worldY, cellSize)  // called on mousemove
-//   Net.requestReset('restart'|'new'|'load', seed, needsVote, moveLog?)  // start over, or ask the room to
-//   Net.vote(voteId, yes)                     // answer an open start-over vote
-//   Net.stop()
-//
-// One sync request per tick carries both directions: outgoing (queued moves +
-// latest cursor) and incoming (whatever the client is behind on). Server owns
-// canonical move ordering. Clicks (moves, votes, resets) don't wait for the next
-// poll: they go out straight away, or right after the request already in flight.
+// net.js – the multiplayer sync loop, exposed as window.Net. Each request sends our queued moves and cursor and
+// brings back whatever we're behind on; the server owns move order. Clicks go out at once instead of waiting a poll.
 (function(){
-    const POLL_ACTIVE_MS = 250;  // 4 syncs/sec while anyone in the room is doing something
-    const POLL_IDLE_MS = 500;    // 2 syncs/sec once the room has been quiet for IDLE_AFTER_MS
+    const POLL_ACTIVE_MS = 250;  // while anyone in the room is doing something
+    const POLL_IDLE_MS = 500;    // once the room has been quiet for IDLE_AFTER_MS
     const IDLE_AFTER_MS = 5000;
-    const MIN_SEND_GAP_MS = 100; // clicks closer together than this share a request (keeps under the server's rate limit)
-    const CURSOR_MIN_INTERVAL_MS = 100; // rate-limit outgoing cursor updates
+    const MIN_SEND_GAP_MS = 100; // clicks closer than this share a request (keeps under the server's rate limit)
+    const CURSOR_MIN_INTERVAL_MS = 100;
     const BACKOFF_STEPS_MS = [500, 1500, 4000, 10000];
 
-    let cfg = null;             // {roomId, playerId, name, onSync, onError, onStatus, endpoint}
+    let config = null;           // {roomId, playerId, name, onSync, onError, onStatus, onBackoff, endpoint}
     let running = false;
     let timer = null;
-    let inflight = false;
+    let requestInFlight = false;
     let sinceVersion = 0;
-    let moveIndex = 0;           // count of moveLog entries the client has applied from the server's log
-    let logRevision = 0;         // last-seen server logRevision (bumps on undo rewrites)
-    let outMoves = [];           // moves waiting to be sent
-    let pendingCursor = null;    // latest cursor, to be sent on next sync
-    let pendingHints = null;     // shared hints to push next sync (null = don't send)
-    let currentView = null;      // latest viewport center in world coords — sent every tick when set
-    let round = null;            // last-seen server round (bumps when the room starts over); null until first sync
-    let pendingReset = null;     // start-over request to send next sync
-    let pendingVote = null;      // our answer to an open start-over vote
-    let lastActivityAt = 0;      // last local input or remote change — picks the poll rate
-    let lastOthersSig = '';      // other players' cursor/view positions, to spot remote movement
-    let timerDueAt = 0;          // when the pending tick fires
-    let lastSentAt = 0;          // when the last request went out
-    let flushWanted = false;     // a click came in mid-request: send again as soon as it returns
-    let lastCursorSent = 0;
-    let errStreak = 0;
+    let moveIndex = 0;           // server log entries we've applied
+    let logRevision = 0;         // bumps when an undo rewrites the server's log
+    let round = null;            // bumps when the room starts over; null until the first sync
+    let queuedMoves = [];
+    let pendingCursor = null;
+    let pendingHints = null;
+    let pendingReset = null;
+    let pendingVote = null;
+    let viewCenter = null;       // sent with every request once set
+    let lastActivityAt = 0;      // last local input or remote change; picks the poll rate
+    let lastOthersPositions = '';
+    let nextSyncAt = 0;
+    let lastSentAt = 0;
+    let resendWhenDone = false;  // a click came in mid-request
+    let lastCursorSentAt = 0;
+    let failedSyncs = 0;
 
-    function log(...a){ if (window.NET_DEBUG) console.log('[net]', ...a); }
+    function debugLog(...args){ if (window.NET_DEBUG) console.log('[net]', ...args); }
 
-    function schedule(delay){
-        timerDueAt = Date.now() + delay;
-        timer = setTimeout(tick, delay);
+    function scheduleSync(delay){
+        nextSyncAt = Date.now() + delay;
+        timer = setTimeout(sync, delay);
     }
 
     function isIdle(){ return Date.now() - lastActivityAt >= IDLE_AFTER_MS; }
@@ -56,51 +42,47 @@
     function markActive(){
         const wasIdle = isIdle();
         lastActivityAt = Date.now();
-        // Waking from idle: pull the pending slow tick forward so the first action goes out
-        // POLL_ACTIVE_MS after the last sync, not POLL_IDLE_MS. (Not during error backoff.)
-        if (wasIdle && running && timer && !inflight && errStreak === 0) {
-            const soonest = timerDueAt - POLL_IDLE_MS + POLL_ACTIVE_MS;
-            if (soonest < timerDueAt) { clearTimeout(timer); schedule(Math.max(0, soonest - Date.now())); }
+        // Waking up: bring the pending idle-rate sync forward to the active rate (unless backing off after errors).
+        if (wasIdle && running && timer && !requestInFlight && failedSyncs === 0) {
+            const activeDueAt = nextSyncAt - POLL_IDLE_MS + POLL_ACTIVE_MS;
+            if (activeDueAt < nextSyncAt) { clearTimeout(timer); scheduleSync(Math.max(0, activeDueAt - Date.now())); }
         }
     }
 
-    function sendGap(){ return Math.max(0, lastSentAt + MIN_SEND_GAP_MS - Date.now()); }
+    function msUntilSendAllowed(){ return Math.max(0, lastSentAt + MIN_SEND_GAP_MS - Date.now()); }
 
-    // Send queued clicks now instead of at the next poll. Several calls in one event (a chord
-    // flag queues many moves) land in the same request. Error backoff is left alone.
-    function flushSoon(){
-        if (!running || errStreak > 0) return;
-        if (inflight) { flushWanted = true; return; }
-        const wait = sendGap();
-        if (timer && timerDueAt - Date.now() <= wait) return;
+    // Sends queued clicks now rather than at the next poll. Calls from one event (a chord flag queues several
+    // moves) share a request. Error backoff is left alone.
+    function sendSoon(){
+        if (!running || failedSyncs > 0) return;
+        if (requestInFlight) { resendWhenDone = true; return; }
+        const wait = msUntilSendAllowed();
+        if (timer && nextSyncAt - Date.now() <= wait) return;
         clearTimeout(timer);
-        schedule(wait);
+        scheduleSync(wait);
     }
 
-    function othersSig(players){
+    function otherPlayersPositions(players){
         let s = '';
         for (const pid in players || {}) {
-            if (pid === cfg.playerId) continue;
+            if (pid === config.playerId) continue;
             const p = players[pid] || {};
             s += pid + ':' + (p.cursor ? p.cursor.x + ',' + p.cursor.y : '') + '|' + (p.view ? p.view.x + ',' + p.view.y : '') + ';';
         }
         return s;
     }
 
-    async function tick(){
-        if (!running || inflight) return;
-        inflight = true;
+    async function sync(){
+        if (!running || requestInFlight) return;
+        requestInFlight = true;
         lastSentAt = Date.now();
-        flushWanted = false;
-        // Snapshot outgoing state so anything that arrives mid-request goes in the next tick.
-        const moves = outMoves;
-        outMoves = [];
-        const cursor = pendingCursor;
-        // Skip cursor field entirely if we sent one very recently and nothing else is going out.
-        const cursorToSend = (moves.length > 0 || (Date.now() - lastCursorSent) >= CURSOR_MIN_INTERVAL_MS) ? cursor : null;
-        if (cursorToSend) lastCursorSent = Date.now();
-
-        // Snapshot pending hints similarly so a mid-request change queues for the next tick.
+        resendWhenDone = false;
+        // Take what's queued now; anything arriving mid-request goes in the next one.
+        const moves = queuedMoves;
+        queuedMoves = [];
+        // Leave the cursor out if one went very recently and nothing else is going.
+        const cursor = (moves.length > 0 || Date.now() - lastCursorSentAt >= CURSOR_MIN_INTERVAL_MS) ? pendingCursor : null;
+        if (cursor) lastCursorSentAt = Date.now();
         const hints = pendingHints;
         pendingHints = null;
         const reset = pendingReset;
@@ -109,148 +91,140 @@
         pendingVote = null;
 
         try {
-            const body = {
-                roomId: cfg.roomId,
-                playerId: cfg.playerId,
-                name: cfg.name,
-                sinceVersion,
-                moveIndex,
-                logRevision,
-                cursor: cursorToSend,
-                view: currentView,
-                moves,
-                hints,
-                // Server drops moves/reset tagged with an old round, so clicks made just before
-                // someone else's reset don't land on the fresh board.
-                round,
-                reset,
-                vote,
-            };
-            const res = await fetch(cfg.endpoint, {
+            const res = await fetch(config.endpoint, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(body),
-                // Multiplayer state must always come from network, never from SW cache.
-                cache: 'no-store',
+                body: JSON.stringify({
+                    roomId: config.roomId,
+                    playerId: config.playerId,
+                    name: config.name,
+                    sinceVersion,
+                    moveIndex,
+                    logRevision,
+                    cursor,
+                    view: viewCenter,
+                    moves,
+                    hints,
+                    round, // the server drops moves and resets from an older round
+                    reset,
+                    vote,
+                }),
+                cache: 'no-store', // never from the service worker's cache
             });
             if (!res.ok) throw new Error('HTTP ' + res.status);
             const data = await res.json();
-            errStreak = 0;
-            if (cfg.onStatus) cfg.onStatus('connected');
+            failedSyncs = 0;
+            if (config.onStatus) config.onStatus('connected');
 
             if (typeof data.version === 'number') sinceVersion = data.version;
             if (typeof data.moveIndex === 'number') moveIndex = data.moveIndex;
             if (typeof data.logRevision === 'number') logRevision = data.logRevision;
             if (typeof data.round === 'number') round = data.round;
-            // Other players' activity keeps us at the fast rate too, so watching someone play stays smooth.
-            const sig = othersSig(data.players);
-            if (sig !== lastOthersSig || (data.newMoves && data.newMoves.length) || typeof data.moveLog === 'string'
+            // Others' activity keeps the active rate too, so watching someone play stays smooth.
+            const positions = otherPlayersPositions(data.players);
+            if (positions !== lastOthersPositions || (data.newMoves && data.newMoves.length) || typeof data.moveLog === 'string'
                     || (data.resetVote && data.resetVote.status === 'open')) markActive();
-            lastOthersSig = sig;
-            if (cfg.onSync) cfg.onSync(data);
+            lastOthersPositions = positions;
+            if (config.onSync) config.onSync(data);
         } catch (err) {
-            // Put unsent moves back at the head of the queue so nothing is dropped.
-            outMoves = moves.concat(outMoves);
-            // Requeue hints too so a transient error doesn't lose the user's toggle.
+            // Requeue everything unsent, so a failed request loses nothing.
+            queuedMoves = moves.concat(queuedMoves);
             if (hints && !pendingHints) pendingHints = hints;
             if (reset && !pendingReset) pendingReset = reset;
             if (vote && !pendingVote) pendingVote = vote;
-            errStreak++;
-            if (cfg.onStatus) cfg.onStatus('disconnected');
-            if (cfg.onError) cfg.onError(err);
-            log('sync error', err);
+            failedSyncs++;
+            if (config.onStatus) config.onStatus('disconnected');
+            if (config.onError) config.onError(err);
+            debugLog('sync error', err);
         } finally {
-            inflight = false;
+            requestInFlight = false;
             if (running) {
-                const delay = errStreak > 0
-                    ? BACKOFF_STEPS_MS[Math.min(errStreak - 1, BACKOFF_STEPS_MS.length - 1)]
-                    : flushWanted ? sendGap()
+                const delay = failedSyncs > 0
+                    ? BACKOFF_STEPS_MS[Math.min(failedSyncs - 1, BACKOFF_STEPS_MS.length - 1)]
+                    : resendWhenDone ? msUntilSendAllowed()
                     : (isIdle() ? POLL_IDLE_MS : POLL_ACTIVE_MS);
-                if (errStreak > 0 && cfg.onBackoff) cfg.onBackoff({retryInMs: delay, errStreak});
-                schedule(delay);
+                if (failedSyncs > 0 && config.onBackoff) config.onBackoff({retryInMs: delay, errStreak: failedSyncs});
+                scheduleSync(delay);
             }
         }
     }
 
     window.Net = {
-        start(config){
+        start(options){
             if (running) this.stop();
-            cfg = Object.assign({endpoint: './php/sync.php'}, config);
+            config = Object.assign({endpoint: './php/sync.php'}, options);
             running = true;
             sinceVersion = 0;
             moveIndex = 0;
             logRevision = 0;
-            outMoves = [];
+            round = null;
+            queuedMoves = [];
             pendingCursor = null;
             pendingHints = null;
-            currentView = null;
-            round = null;
             pendingReset = null;
             pendingVote = null;
-            lastActivityAt = Date.now(); // start at the fast rate while the room loads in
-            lastOthersSig = '';
-            flushWanted = false;
-            errStreak = 0;
-            // First tick fires immediately so the client gets initial state without a 300ms wait.
-            tick();
+            viewCenter = null;
+            lastActivityAt = Date.now(); // at the active rate while the room loads in
+            lastOthersPositions = '';
+            resendWhenDone = false;
+            failedSyncs = 0;
+            sync();
         },
         stop(){
             running = false;
             if (timer) { clearTimeout(timer); timer = null; }
-            cfg = null;
+            config = null;
         },
+        // entry: ['r'|'f'|'u', x, y]
         sendMove(entry){
-            // entry: ['r'|'f'|'u', x, y]
             if (!running || !entry || entry.length < 3) return;
-            outMoves.push(entry);
+            queuedMoves.push(entry);
             markActive();
-            flushSoon();
+            sendSoon();
         },
+        // Our moves the server hasn't taken yet, tagged with our owner id like the server's newMoves. The board
+        // lays these over the server's log, so a sync never briefly undoes a click.
         pendingMoves(){
-            // Our moves the server hasn't taken yet, with our owner id like the server's newMoves.
-            // The board lays these over the server's log so a sync never briefly undoes a click.
             if (!running) return [];
-            const owner = cfg.playerId.slice(0, 8);
-            return outMoves.map(m => [m[0], m[1], m[2], owner]);
+            const owner = config.playerId.slice(0, 8);
+            return queuedMoves.map(m => [m[0], m[1], m[2], owner]);
         },
         sendCursor(x, y, cellSize){
             if (!running) return;
             pendingCursor = {x, y, cellSize};
             markActive();
         },
+        // Shared gameplay hints only; UI settings stay local.
         sendHints(hints){
-            // Shared gameplay hints only — UI settings never round-trip through here.
             if (!running || !hints) return;
             pendingHints = hints;
             markActive();
-            flushSoon();
+            sendSoon();
         },
+        // kind: 'restart' keeps the seed, 'new' switches to seed (or the server picks), 'load' takes a save file's
+        // seed and encoded moveLog. needsVote: progress is at stake, so a non-founder's request goes to a vote.
         requestReset(kind, seed, needsVote, moveLog){
-            // kind: 'restart' keeps the seed, 'new' switches to seed (server picks one if empty),
-            // 'load' replaces the board with a save file's seed + encoded moveLog.
-            // needsVote: there's progress at stake, so a non-founder's request goes to a room vote.
             if (!running) return;
             pendingReset = {kind, seed: seed || null, needsVote: !!needsVote, moveLog: kind === 'load' ? moveLog : undefined};
             markActive();
-            flushSoon();
+            sendSoon();
         },
         vote(id, yes){
             if (!running) return;
             pendingVote = {id, yes: !!yes};
             markActive();
-            flushSoon();
+            sendSoon();
         },
+        // Our viewport centre in world coords, so other players can jump to it.
         setView(x, y){
-            // Viewport center in world coords. Sent every tick so other players can "go to" us.
             if (!running) return;
-            currentView = {x, y};
+            viewCenter = {x, y};
             markActive();
         },
         updateName(name){
-            if (cfg) cfg.name = name;
+            if (config) config.name = name;
         },
         isRunning(){ return running; },
-        // Exposed for the UI so it can show "syncing…" state or force an immediate tick.
-        flushNow(){ if (running && !inflight) { if (timer) clearTimeout(timer); tick(); } },
+        flushNow(){ if (running && !requestInFlight) { if (timer) clearTimeout(timer); sync(); } },
     };
 })();

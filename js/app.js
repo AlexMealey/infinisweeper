@@ -1,35 +1,51 @@
-// app.js – App component and ReactDOM render (JSX, processed by Babel)
+// app.js – App component and ReactDOM render (JSX, compiled by Babel in the browser)
 const{useState,useCallback,useMemo,useEffect,useRef}=React;
 
+const DEFAULT_UI_SETTINGS={showArrows:true,showScores:true,showLeaderboard:true,showUndo:true,showZoom:true,showCoords:true,showSeed:true,showSeedBox:true,showLockBtn:true,defaultCellSize:CELL_SIZE_DEFAULT,exportRes:'auto',tlMovesPerFrame:1,tlFps:60,tlRes:'auto'};
+const CLEARED_PER_UNDO=1000;
+const MAX_VIDEO_BYTES=50e6; // timelapse.js has the same limit
+
+// The world position (in fractional cells) under a screen point, for a view centred on viewX, viewY.
+function screenToWorld(rect,clientX,clientY,cellSize,viewX,viewY){
+    const cols=Math.floor(rect.width/cellSize),rows=Math.floor(rect.height/cellSize);
+    const padX=(rect.width-cols*cellSize)/2,padY=(rect.height-rows*cellSize)/2;
+    return[viewX-Math.floor(cols/2)+(clientX-rect.left-padX)/cellSize,viewY-Math.floor(rows/2)+(clientY-rect.top-padY)/cellSize];
+}
+const formatSize=bytes=>{const kb=bytes/1e3;return kb<1000?Math.ceil(kb)+' KB':(kb/1e3).toFixed(1)+' MB'};
+const formatDuration=sec=>{const t=Math.round(sec);return`${Math.floor(t/60)}:${String(t%60).padStart(2,'0')}`};
+const exportFileDate=()=>new Date().toISOString().replace(/[:.]/g,'-').slice(0,19); // UTC
+const downloadBlob=(blob,fileName,revokeAfterMs)=>{
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');a.href=url;a.download=fileName;a.click();
+    setTimeout(()=>URL.revokeObjectURL(url),revokeAfterMs);
+};
+
 function App(){
-    const initS=getURLSeed()||rndSeed();
-    const[seedStr,setSeedStr]=useState(initS);
-    const[activeSeed,setActiveSeed]=useState(initS);
-    const[locked,setLocked]=useState(!!getURLSeed());
-    // View size is a per-browser preference, kept apart from game saves so it survives refreshes
-    // in multiplayer rooms and on boards with no moves yet (neither writes minesweeper_save).
+    const initialSeed=getSeedFromURL()||randomSeed();
+    const[seedInput,setSeedInput]=useState(initialSeed);
+    const[activeSeed,setActiveSeed]=useState(initialSeed);
+    const[seedLocked,setSeedLocked]=useState(!!getSeedFromURL());
+    // A per-browser preference, kept apart from game saves so rooms and empty boards remember it too.
     const[viewMode,setViewMode]=useState(()=>{
-        const ok=v=>v==='Fullscreen'||VIEWS.hasOwnProperty(v);
+        const isValid=v=>v==='Fullscreen'||VIEW_SIZES.hasOwnProperty(v);
         try{
-            const v=localStorage.getItem('minesweeper_view');if(ok(v))return v;
-            // Older builds only kept the view inside the game save.
-            const s=JSON.parse(localStorage.getItem('minesweeper_save')||'null');if(s&&ok(s.viewMode))return s.viewMode;
+            const v=localStorage.getItem('minesweeper_view');if(isValid(v))return v;
+            const save=JSON.parse(localStorage.getItem('minesweeper_save')||'null');if(save&&isValid(save.viewMode))return save.viewMode; // older builds
         }catch(e){console.error('Failed to read saved view mode',e)}
         return'Large'});
-    const[cellSize,setCellSize]=useState(ZDEF);
+    const[cellSize,setCellSize]=useState(CELL_SIZE_DEFAULT);
     const[viewX,setViewX]=useState(0);
     const[viewY,setViewY]=useState(0);
     const[cells,setCells]=useState({});
     const[gameOver,setGameOver]=useState(false);
     const[moves,setMoves]=useState(0);
     const[flags,setFlags]=useState(0);
-    const[hover,setHover]=useState(null);
+    const[hoveredCell,setHoveredCell]=useState(null);
     const[gridDims,setGridDims]=useState({cols:20,rows:15});
     const[containerSize,setContainerSize]=useState({w:800,h:600});
     const[firstClick,setFirstClick]=useState(null);
-    const[hints,setHints]=useState(()=>{try{const s=localStorage.getItem('minesweeper_hints');if(s)return migrateHints(JSON.parse(s))}catch(e){console.error('Failed to read saved hints',e)}return{wrongFlags:false,pulseNeighbors:false,undoEnabled:false,undoMode:'refill',chordFlag:false}});
-    const dfltUI={showArrows:true,showScores:true,showLeaderboard:true,showUndo:true,showZoom:true,showCoords:true,showSeed:true,showSeedBox:true,showLockBtn:true,defaultCellSize:ZDEF,exportRes:'auto',tlMovesPerFrame:1,tlFps:60,tlRes:'auto'};
-    const[uiSettings,setUiSettings]=useState(()=>{try{const s=localStorage.getItem('minesweeper_ui');if(s)return{...dfltUI,...JSON.parse(s)}}catch(e){console.error('Failed to read saved UI settings',e)}return dfltUI});
+    const[hints,setHints]=useState(()=>{try{const s=localStorage.getItem('minesweeper_hints');if(s)return migrateHints(JSON.parse(s))}catch(e){console.error('Failed to read saved hints',e)}return migrateHints(null)});
+    const[uiSettings,setUiSettings]=useState(()=>{try{const s=localStorage.getItem('minesweeper_ui');if(s)return{...DEFAULT_UI_SETTINGS,...JSON.parse(s)}}catch(e){console.error('Failed to read saved UI settings',e)}return DEFAULT_UI_SETTINGS});
     const[showSettings,setShowSettings]=useState(false);
     const[status,setStatus]=useState('');
     const[videoExporting,setVideoExporting]=useState(false);
@@ -41,81 +57,53 @@ function App(){
     });
     const[lastEntryDate,setLastEntryDate]=useState(null);
     const leaderboardRecordedRef=useRef(false);
-    const runIdRef=useRef(genRunId());
-    // null: the timelapse is rebuilt from moveLogRef. An array only for version 1 saves, which have no move log.
-    const timelapseRef=useRef(null);
+    const runIdRef=useRef(newRunId());
+    const v1FramesRef=useRef(null); // a version 1 save's recorded frames; null when the move log has the history
     const moveLogRef=useRef([]);
-    const curFlagsRef=useRef({});
-    const clearedCount = useMemo(() => Object.values(cells).filter(s => s && s[0] === 'r').length, [cells]);
-    const totalArea = useMemo(() => {
-        const keys = Object.keys(cells);
-        if (keys.length === 0) return 0;
-        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-        keys.forEach(k => {
-            const [x, y] = k.split(',').map(Number);
-            if (x < minX) minX = x; if (x > maxX) maxX = x;
-            if (y < minY) minY = y; if (y > maxY) maxY = y;
-        });
-        return (maxX - minX + 1) * (maxY - minY + 1);
-    }, [cells]);
+    const flagMapRef=useRef({});
+    const clearedCount=useMemo(()=>Object.values(cells).filter(s=>s&&s[0]==='r').length,[cells]);
     const containerRef=useRef(null);
-    const prevMode=useRef('Medium');
-    const fcProcessed=useRef(false);
+    const viewBeforeFullscreenRef=useRef('Medium');
+    const firstClickRevealedRef=useRef(false);
 
-    // --- Multiplayer state ---
-    // roomId comes from ?room= in the URL. Everything else stays inert in single-player mode.
+    // --- Multiplayer state (inert outside a room) ---
     const mpRoomId=useMemo(()=>new URLSearchParams(window.location.search).get('room'),[]);
-    // playerId is state (not a ref) so the Net-start effect re-runs once it's assigned.
-    const[mpPlayerId,setMpPlayerId]=useState(null);
-    const mpSelfIdShort=useMemo(()=>mpPlayerId?mpPlayerId.slice(0,8):null,[mpPlayerId]);
+    const[mpPlayerId,setMpPlayerId]=useState(null); // state, so the sync effect starts once it's assigned
+    const mpOwnerTag=useMemo(()=>mpPlayerId?mpPlayerId.slice(0,8):null,[mpPlayerId]); // how the server credits our moves
     const[mpName,setMpName]=useState(()=>localStorage.getItem('minesweeper_name')||'');
     const[mpNamePromptOpen,setMpNamePromptOpen]=useState(!!mpRoomId&&!localStorage.getItem('minesweeper_name'));
-    // Start menu: {step, closable} or null. Opens by itself on a fresh visit (not in a room, no saved
-    // game to restore, no singleplayer start queued from a room), and from the header's Menu button.
+    // Start menu: {step, closable}, or null. Opens by itself on a fresh visit: no room, saved game or queued start.
     const[startMenu,setStartMenu]=useState(()=>{
-        const fresh={step:'choose',closable:false};
         if(mpRoomId||localStorage.getItem('minesweeper_pending_start'))return null;
         try{
-            const s=JSON.parse(localStorage.getItem('minesweeper_save')||'null');
-            if(s&&(s.version===1?s.cells&&Object.keys(s.cells).length:s.moveLog&&s.moveLog.length))return null;
+            const save=JSON.parse(localStorage.getItem('minesweeper_save')||'null');
+            if(save&&(save.version===1?save.cells&&Object.keys(save.cells).length:save.moveLog&&save.moveLog.length))return null;
         }catch(e){console.error('Failed to read saved game',e)}
-        return fresh});
+        return{step:'choose',closable:false}});
     const[mpPlayers,setMpPlayers]=useState({});
     const[mpStatus,setMpStatus]=useState('connecting');
-    // Canonical, server-ordered move log for this room. Rebuilt state comes from replaying this.
-    const mpCanonicalMovesRef=useRef([]);
-    // Parallel array of owner tags (first 8 hex of playerId) — used only for game-over attribution.
-    const mpMoveOwnersRef=useRef([]);
-    // Guards local move handlers from calling into Net before it's actually started.
-    const mpNetActiveRef=useRef(false);
-    // Owner tag (short pid) of whoever triggered the current gameOver, or null.
-    const[mpGameOverBy,setMpGameOverBy]=useState(null);
-    // Last hints snapshot received from the server — see the hint-sync effect below.
+    const mpServerLogRef=useRef([]); // the room's move log, in server order
+    const mpServerOwnersRef=useRef([]); // owner tag of each entry, for game-over attribution
+    const mpSyncingRef=useRef(false);
+    const[mpLoserTag,setMpLoserTag]=useState(null); // owner tag of whoever hit the mine
     const mpLastSyncedHintsRef=useRef(null);
-    // Backoff signal from Net.js (populated only while sync is failing).
-    const[mpBackoff,setMpBackoff]=useState(null);
-    // Room creator's playerId — they can start over without a vote.
-    const[mpFounderId,setMpFounderId]=useState(null);
-    // Open (or just-resolved) start-over vote from the server, or null.
+    const[mpBackoff,setMpBackoff]=useState(null); // set while syncs are failing
+    const[mpFounderId,setMpFounderId]=useState(null); // the room's creator, who can start over without a vote
     const[mpResetVote,setMpResetVote]=useState(null);
-    // Last server round seen; a change means the room started over. null until the first sync.
-    const mpRoundRef=useRef(null);
-    // Top-right notices about what other players did ("Alex used an undo").
+    const mpRoundRef=useRef(null); // a change means the room started over
     const[mpToasts,setMpToasts]=useState([]);
     const mpToastIdRef=useRef(0);
-    // Highest room event seq already handled; null until the first sync.
-    const mpEventSeqRef=useRef(null);
+    const mpLastEventSeqRef=useRef(null);
     const pushToast=useCallback(text=>{
         const id=++mpToastIdRef.current;
         setMpToasts(ts=>[...ts.slice(-3),{id,text}]);
         setTimeout(()=>setMpToasts(ts=>ts.filter(t=>t.id!==id)),5000);
     },[]);
 
-    const lastSave=useRef('');
-    const lastSaveSig=useRef('');
-    const sigOfState=s=>{
-        const ml=typeof s.moveLog==='string'?s.moveLog.length:(Array.isArray(s.moveLog)?s.moveLog.length:0);
-        return ml+'|'+s.activeSeed+'|'+s.locked+'|'+s.viewMode+'|'+s.cellSize+'|'+s.viewX+'|'+s.viewY+'|'+JSON.stringify(s.hints);
+    const savedSignatureRef=useRef('');
+    const saveSignature=save=>{
+        const logLength=typeof save.moveLog==='string'?save.moveLog.length:(Array.isArray(save.moveLog)?save.moveLog.length:0);
+        return logLength+'|'+save.activeSeed+'|'+save.locked+'|'+save.viewMode+'|'+save.cellSize+'|'+save.viewX+'|'+save.viewY+'|'+JSON.stringify(save.hints);
     };
 
     useEffect(()=>{try{localStorage.setItem('minesweeper_hints',JSON.stringify(hints))}catch(e){console.error('Failed to save hints',e)}},[hints]);
@@ -123,55 +111,55 @@ function App(){
     useEffect(()=>{try{localStorage.setItem('minesweeper_view',viewMode)}catch(e){console.error('Failed to save view mode',e)}},[viewMode]);
     useEffect(()=>{document.title=activeSeed?`${activeSeed} - InfiniSweeper`:'InfiniSweeper'},[activeSeed]);
 
-    // Fullscreen hides the status line under the board, so the latest status also shows as a toast there.
-    // It's one toast updated in place, so progress messages don't pile up; longer messages stay up longer.
+    // Fullscreen hides the status line, so the latest status also shows as a toast, updated in place.
     const[statusToast,setStatusToast]=useState(null);
-    const statusToastTimer=useRef(null);
+    const statusToastTimerRef=useRef(null);
     const showStatus=useCallback(msg=>{
         setStatus(msg);
-        clearTimeout(statusToastTimer.current);
+        clearTimeout(statusToastTimerRef.current);
         if(!msg){setStatusToast(null);return}
         setStatusToast({id:'status',text:msg});
-        statusToastTimer.current=setTimeout(()=>setStatusToast(null),Math.max(5000,String(msg).length*70));
+        statusToastTimerRef.current=setTimeout(()=>setStatusToast(null),Math.max(5000,String(msg).length*70));
     },[]);
 
-    const getGameState=useCallback(()=>({
-        version:3,activeSeed,locked,viewMode,cellSize,viewX,viewY,hints,moveLog:encodeMoveLog(moveLogRef.current),timestamp:Date.now(),runId:runIdRef.current
-    }),[activeSeed,locked,viewMode,cellSize,viewX,viewY,hints,cells,gameOver,moves,flags,firstClick]);
+    const buildSave=useCallback(()=>({
+        version:3,activeSeed,locked:seedLocked,viewMode,cellSize,viewX,viewY,hints,moveLog:encodeMoveLog(moveLogRef.current),timestamp:Date.now(),runId:runIdRef.current
+    }),[activeSeed,seedLocked,viewMode,cellSize,viewX,viewY,hints,cells,gameOver,moves,flags,firstClick]);
 
-    // Saves still carry viewMode, but it's ignored here — the minesweeper_view preference wins.
-    const loadGameState=useCallback(data=>{
+    // A save's viewMode is ignored: the minesweeper_view preference wins.
+    const loadSave=useCallback(data=>{
         if(!data)return false;
         if(data.version===3||data.version===2){
             const log=data.version===3
                 ?decodeMoveLog(typeof data.moveLog==='string'?data.moveLog:'')
                 :(Array.isArray(data.moveLog)?data.moveLog.slice():[]);
-            setActiveSeed(data.activeSeed);setSeedStr(data.activeSeed);setLocked(data.locked);
+            setActiveSeed(data.activeSeed);setSeedInput(data.activeSeed);setSeedLocked(data.locked);
             setCellSize(data.cellSize);setViewX(data.viewX);setViewY(data.viewY);
             setHints(migrateHints(data.hints));
-            runIdRef.current=data.runId||genRunId();
+            runIdRef.current=data.runId||newRunId();
             moveLogRef.current=log;
-            timelapseRef.current=null;
-            const out=replayMoveLog(data.activeSeed,log,!!(data.hints&&data.hints.wrongFlags),null);
-            curFlagsRef.current=out.finalFlags;
-            setCells(out.cells);setMoves(out.moves);setFlags(out.flags);setGameOver(out.gameOver);setFirstClick(out.firstClick);
-            setClearedAtLastUndo(out.clearedAtLastUndo);
-            setUndoUsedCount(out.undoUsedCount);
-            setShowGameOverModal(!!out.gameOver);
-            fcProcessed.current=log.length>0;
+            v1FramesRef.current=null;
+            const replay=replayMoveLog(data.activeSeed,log,!!(data.hints&&data.hints.wrongFlags));
+            flagMapRef.current=replay.finalFlags;
+            setCells(replay.cells);setMoves(replay.moves);setFlags(replay.flags);setGameOver(replay.gameOver);setFirstClick(replay.firstClick);
+            setClearedAtLastUndo(replay.clearedAtLastUndo);
+            setUndoUsedCount(replay.undoUsedCount);
+            setShowGameOverModal(!!replay.gameOver);
+            firstClickRevealedRef.current=log.length>0;
             return true;
         }
         if(data.version===1){
-            setActiveSeed(data.activeSeed);setSeedStr(data.activeSeed);setLocked(data.locked);
+            setActiveSeed(data.activeSeed);setSeedInput(data.activeSeed);setSeedLocked(data.locked);
             setCellSize(data.cellSize);setViewX(data.viewX);setViewY(data.viewY);
             setCells(data.cells);setGameOver(data.gameOver);setMoves(data.moves);setFlags(data.flags);
             setFirstClick(data.firstClick);setHints(migrateHints(data.hints));
-            runIdRef.current=data.runId||genRunId();
-            fcProcessed.current=!!(data.cells&&Object.keys(data.cells).length>0);
+            runIdRef.current=data.runId||newRunId();
+            const hasCells=!!(data.cells&&Object.keys(data.cells).length>0);
+            firstClickRevealedRef.current=hasCells;
             moveLogRef.current=[];
-            const flagsNow=extractFlags(data.cells||{});
-            curFlagsRef.current=flagsNow;
-            timelapseRef.current=(data.cells&&Object.keys(data.cells).length>0)?[{diff:Object.entries(data.cells),flags:flagsNow}]:null;
+            const flagMap=extractFlags(data.cells||{});
+            flagMapRef.current=flagMap;
+            v1FramesRef.current=hasCells?[{diff:Object.entries(data.cells),flags:flagMap}]:null;
             setClearedAtLastUndo(null);
             setUndoUsedCount(0);
             setShowGameOverModal(!!data.gameOver);
@@ -180,18 +168,13 @@ function App(){
         return false;
     },[]);
 
-    const handleExport=()=>{
-        const state=getGameState();
-        const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'});
-        const url=URL.createObjectURL(blob);const a=document.createElement('a');
-        const date=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
-        a.href=url;a.download=`${date}-minesweeper-save.json`;a.click();
-        URL.revokeObjectURL(url);
-        lastSave.current=JSON.stringify(state);
-        lastSaveSig.current=sigOfState(state);
+    const downloadSave=()=>{
+        const save=buildSave();
+        downloadBlob(new Blob([JSON.stringify(save,null,2)],{type:'application/json'}),`${exportFileDate()}-minesweeper-save.json`,0);
+        savedSignatureRef.current=saveSignature(save);
         showStatus('Save file downloaded')};
 
-    const handleImport=e=>{
+    const importSaveFile=e=>{
         const file=e.target.files[0];if(!file)return;
         const reader=new FileReader();
         reader.onload=ev=>{
@@ -199,9 +182,8 @@ function App(){
                 if(mpRoomId){importIntoRoom(data);return}
                 if(data.version===1||data.version===2||data.version===3){
                     if(moves>0&&!confirm('Overwrite current progress?'))return;
-                    if(loadGameState(data)){
-                        lastSave.current=JSON.stringify(data);
-                        lastSaveSig.current=sigOfState(data);
+                    if(loadSave(data)){
+                        savedSignatureRef.current=saveSignature(data);
                         showStatus('Save file loaded successfully');
                     }else showStatus('Invalid save file')}
                 else showStatus('Incompatible save version')}
@@ -209,417 +191,374 @@ function App(){
         reader.onerror=()=>{console.error('Failed to read save file',reader.error);showStatus('Could not read file')};
         reader.readAsText(file);e.target.value=''};
 
-    const clearSave=()=>{localStorage.removeItem('minesweeper_save');lastSave.current='';lastSaveSig.current='';showStatus('Cache cleared')};
+    const clearSave=()=>{localStorage.removeItem('minesweeper_save');savedSignatureRef.current='';showStatus('Cache cleared')};
 
-    // Date and time (UTC) for export file names.
-    const exportFileDate=()=>new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
-    // The original full-canvas export. Still used when mapimage.js didn't load, the browser lacks CompressionStream, or the streamed export fails.
-    const exportImageCanvas=(withStats,sz)=>{
+    // The original full-canvas image export, for when mapimage.js didn't load, CompressionStream is missing, or the
+    // streamed export fails.
+    const exportImageViaCanvas=(withStats,cellPx)=>{
         const keys=Object.keys(cells);
         let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
         keys.forEach(k=>{const[x,y]=k.split(',').map(Number);minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y)});
-        const pad=2;
-        minX-=pad;maxX+=pad;minY-=pad;maxY+=pad;
-        const w=maxX-minX+1,h=maxY-minY+1;
-        const gridH=h*sz, footerH=withStats?Math.round(gridH*0.04/0.96):0;
-        const canvasW=w*sz, canvasH=gridH+footerH;
+        const border=2;
+        minX-=border;maxX+=border;minY-=border;maxY+=border;
+        const cols=maxX-minX+1,rows=maxY-minY+1;
+        const boardH=rows*cellPx,footerH=withStats?Math.round(boardH*0.04/0.96):0;
+        const canvasW=cols*cellPx,canvasH=boardH+footerH;
         if(canvasW*canvasH>16000000){if(!confirm('The exported image will be very large. Continue?'))return}
         const canvas=document.createElement('canvas');canvas.width=canvasW;canvas.height=canvasH;
         const ctx=canvas.getContext('2d');
         ctx.fillStyle='#0c0c1e';ctx.fillRect(0,0,canvasW,canvasH);
         for(let y=minY;y<=maxY;y++){
             for(let x=minX;x<=maxX;x++){
-                drawCellToCanvas(ctx,cells[`${x},${y}`],(x-minX)*sz,(y-minY)*sz,sz);}}
-        if(withStats && footerH > 0){
+                drawCellToCanvas(ctx,cells[`${x},${y}`],(x-minX)*cellPx,(y-minY)*cellPx,cellPx);}}
+        if(withStats&&footerH>0){
             ctx.fillStyle='#111128';ctx.fillRect(0,canvasH-footerH,canvasW,footerH);
-            ctx.strokeStyle='#2a2a4a';ctx.lineWidth=Math.max(1, Math.round(footerH/48));ctx.strokeRect(0,canvasH-footerH,canvasW,footerH);
-            const fs=Math.round(footerH*0.3), emojiFs=Math.round(footerH*0.35);
-            ctx.font=`bold ${fs}px sans-serif`;ctx.textAlign='left';ctx.textBaseline='middle';
-            let ox=footerH*0.4;
-            const draw=(l,i,v)=>{
-                ctx.fillStyle='#aaa';ctx.font=`bold ${fs}px sans-serif`;ctx.fillText(l,ox,canvasH-footerH/2);ox+=ctx.measureText(l).width+footerH*0.1;
-                ctx.font=`${emojiFs}px serif`;ctx.fillText(i,ox,canvasH-footerH/2);ox+=footerH*0.45;
-                ctx.fillStyle='#fff';ctx.font=`bold ${fs}px sans-serif`;ctx.fillText(v,ox,canvasH-footerH/2);
-                ox+=ctx.measureText(v).width+footerH*0.6};
-            draw('Mines Flagged:','🚩',flags);
-            draw('Moves Made:','👆',moves);
-            draw('Squares Cleared:','🟦',`${clearedCount}`);
+            ctx.strokeStyle='#2a2a4a';ctx.lineWidth=Math.max(1,Math.round(footerH/48));ctx.strokeRect(0,canvasH-footerH,canvasW,footerH);
+            const fontSize=Math.round(footerH*0.3),iconSize=Math.round(footerH*0.35),midY=canvasH-footerH/2;
+            ctx.font=`bold ${fontSize}px sans-serif`;ctx.textAlign='left';ctx.textBaseline='middle';
+            let penX=footerH*0.4;
+            const drawStat=(label,icon,value)=>{
+                ctx.fillStyle='#aaa';ctx.font=`bold ${fontSize}px sans-serif`;ctx.fillText(label,penX,midY);penX+=ctx.measureText(label).width+footerH*0.1;
+                ctx.font=`${iconSize}px serif`;ctx.fillText(icon,penX,midY);penX+=footerH*0.45;
+                ctx.fillStyle='#fff';ctx.font=`bold ${fontSize}px sans-serif`;ctx.fillText(value,penX,midY);
+                penX+=ctx.measureText(value).width+footerH*0.6};
+            drawStat('Mines Flagged:','🚩',flags);
+            drawStat('Moves Made:','👆',moves);
+            drawStat('Squares Cleared:','🟦',`${clearedCount}`);
         }
         const link=document.createElement('a');link.download=`${exportFileDate()}-minesweeper-seed-${activeSeed}-run.png`;
         link.href=canvas.toDataURL('image/png');link.click();showStatus('Progress image exported')};
     const[exportTask,setExportTask]=useState(null);
-    const exportResultTimer=useRef(null);
-    // Progress goes through a tiny store that the progress toast subscribes to, so ticks don't re-render the board.
-    // The toast (ExportProgressToast) leaves the game usable meanwhile; ExportProgressModal asks for a speed first
-    // when a timelapse is long, and shows the progress instead if components.js is from an older build.
+    const exportResultTimerRef=useRef(null);
+    // Starts an export's progress UI and returns the hooks the exporter reports through. The toast leaves the game
+    // usable; progress goes through a tiny store it subscribes to, so ticks don't re-render the board.
     const beginExportTask=(kind,title)=>{
-        let v={},resolvePlan=null,timer=null,shown=false;const subs=new Set(),ctrl=new AbortController();
+        let progress={},resolvePlan=null,showTimer=null,shown=false;const listeners=new Set(),abort=new AbortController();
         const task={kind,title,startedAt:Date.now(),plan:null,
-            progress:{get:()=>v,set:x=>{v={...v,...x};subs.forEach(f=>f(v))},sub:f=>{subs.add(f);return()=>{subs.delete(f)}}},
-            cancel:()=>{if(resolvePlan){resolvePlan(false);resolvePlan=null}ctrl.abort()},
-            start:n=>{if(resolvePlan){resolvePlan({movesPerFrame:n});resolvePlan=null}setExportTask(t=>t&&{...t,plan:null})}};
-        clearTimeout(exportResultTimer.current);
-        // Shown after 300ms so quick exports don't flash it.
+            progress:{get:()=>progress,set:update=>{progress={...progress,...update};listeners.forEach(f=>f(progress))},sub:f=>{listeners.add(f);return()=>{listeners.delete(f)}}},
+            cancel:()=>{if(resolvePlan){resolvePlan(false);resolvePlan=null}abort.abort()},
+            start:movesPerFrame=>{if(resolvePlan){resolvePlan({movesPerFrame});resolvePlan=null}setExportTask(t=>t&&{...t,plan:null})}};
+        clearTimeout(exportResultTimerRef.current);
         const hasUI=!!(window.ExportProgressToast||window.ExportProgressModal);
-        if(hasUI)timer=setTimeout(()=>{shown=true;setExportTask(task)},300);
-        return{signal:ctrl.signal,onProgress:x=>task.progress.set(x),hasModal:!!window.ExportProgressModal,
-            askPlan:pl=>new Promise(r=>{resolvePlan=r;clearTimeout(timer);shown=true;setExportTask({...task,plan:pl})}),
-            // result {ok, title, text}: if the toast was up, it shows that for a few seconds instead of vanishing.
-            // Returns whether it did, so the caller can skip a second, duplicate toast for the same message.
+        if(hasUI)showTimer=setTimeout(()=>{shown=true;setExportTask(task)},300); // so quick exports don't flash it
+        return{signal:abort.signal,onProgress:update=>task.progress.set(update),hasModal:!!window.ExportProgressModal,
+            // Shows a long timelapse's speed picker. Resolves to false, or {movesPerFrame}.
+            askPlan:plan=>new Promise(resolve=>{resolvePlan=resolve;clearTimeout(showTimer);shown=true;setExportTask({...task,plan})}),
+            // Shows result {ok, title, text} in the toast for a few seconds. Returns false if there was no toast to show it in.
             end:result=>{
-                clearTimeout(timer);
+                clearTimeout(showTimer);
                 if(!(result&&shown&&window.ExportProgressToast)){setExportTask(null);return false}
                 setExportTask({...task,plan:null,result});
-                exportResultTimer.current=setTimeout(()=>setExportTask(t=>t&&t.result===result?null:t),Math.max(5000,(result.title+(result.text||'')).length*70));
+                exportResultTimerRef.current=setTimeout(()=>setExportTask(t=>t&&t.result===result?null:t),Math.max(5000,(result.title+(result.text||'')).length*70));
                 return true}};
     };
-    // Reports how an export ended: in its toast when it had one, otherwise as a status message.
-    const endExport=(ex,result)=>{
-        const msg=result?(result.text?`${result.title} (${result.text})`:result.title):'';
-        if(ex.end(result))setStatus(msg);else if(msg)showStatus(msg);
+    // Reports how an export ended: in its toast if it had one, otherwise as a status message.
+    const finishExport=(job,result)=>{
+        const message=result?(result.text?`${result.title} (${result.text})`:result.title):'';
+        if(job.end(result))setStatus(message);else if(message)showStatus(message);
     };
-    const fmtSize=bytes=>{const kb=bytes/1e3;return kb<1000?Math.ceil(kb)+' KB':(kb/1e3).toFixed(1)+' MB'};
     const imageExportingRef=useRef(false);
-    const handleExportImage=async(withStats=true)=>{
+    const exportImage=async(withStats=true)=>{
         if(imageExportingRef.current)return;
         if(Object.keys(cells).length===0){showStatus('No progress to export');return}
         const res=uiSettings.exportRes||'auto';
-        const canvasExport=()=>{try{exportImageCanvas(withStats,res==='auto'?32:Math.max(1,Math.min(32,parseInt(res,10)||32)))}
+        const exportViaCanvas=()=>{try{exportImageViaCanvas(withStats,res==='auto'?32:Math.max(1,Math.min(32,parseInt(res,10)||32)))}
             catch(err){console.error('Canvas image export failed',err);showStatus('Image export failed: '+(err&&err.message?err.message:'unknown error'))}};
-        if(!window.MapImage||!window.CompressionStream){canvasExport();return}
+        if(!window.MapImage||!window.CompressionStream){exportViaCanvas();return}
         imageExportingRef.current=true;setStatus('Exporting image…');
-        const ex=beginExportTask('image','Exporting image');
-        let result=null,fallback=false;
+        const job=beginExportTask('image','Exporting image');
+        let result=null,fallBack=false;
         try{
             const stats=withStats?{flags,moves,cleared:clearedCount}:null;
-            const out=await MapImage.render(cells,stats,res,bytes=>confirm(`The exported image will be about ${Math.ceil(bytes/1e6)} MB. Continue?`),undefined,{signal:ex.signal,onProgress:ex.onProgress});
+            const out=await MapImage.render(cells,stats,res,bytes=>confirm(`The exported image will be about ${Math.ceil(bytes/1e6)} MB. Continue?`),undefined,{signal:job.signal,onProgress:job.onProgress});
             if(!out)result={ok:false,title:'Image export cancelled'};
             else{
-                const url=URL.createObjectURL(out.blob);
-                const link=document.createElement('a');link.download=`${exportFileDate()}-minesweeper-seed-${activeSeed}-run.png`;link.href=url;link.click();
-                setTimeout(()=>URL.revokeObjectURL(url),10000);
-                result={ok:true,title:'Progress image exported',text:`${fmtSize(out.blob.size)}, ${out.sz}px per cell`};
+                downloadBlob(out.blob,`${exportFileDate()}-minesweeper-seed-${activeSeed}-run.png`,10000);
+                result={ok:true,title:'Progress image exported',text:`${formatSize(out.blob.size)}, ${out.sz}px per cell`};
             }
         }catch(err){
             if(err&&err.name==='AbortError')result={ok:false,title:'Image export cancelled'};
-            else{console.error('Image export failed, falling back to canvas export',err);fallback=true}}
-        finally{imageExportingRef.current=false;endExport(ex,result)}
-        if(fallback)canvasExport()};
+            else{console.error('Image export failed, falling back to canvas export',err);fallBack=true}}
+        finally{imageExportingRef.current=false;finishExport(job,result)}
+        if(fallBack)exportViaCanvas()};
 
-    const fmtDuration=sec=>{const t=Math.round(sec);return`${Math.floor(t/60)}:${String(t%60).padStart(2,'0')}`};
-    // Frames for the in-memory exporter: version 1 saves carry their own, otherwise replay the move log.
-    // Board-changing moves as [{diff, flagged}] for the in-memory exporter. Only what changed is kept: holding a
-    // snapshot of every flag for every move (as recorded frames did) ran long games out of memory.
-    const legacyVideoSteps=()=>{
-        const out=[];
-        if(Array.isArray(timelapseRef.current)&&timelapseRef.current.length){
-            // Version 1 saves have recorded frames with a flag snapshot each; turn those into flag changes.
-            let prev={};
-            for(const fr of timelapseRef.current){
-                const diff=fr.diff.slice(),seen=new Set(diff.map(d=>d[0])),fl=fr.flags||{};
-                for(const k of new Set([...Object.keys(prev),...Object.keys(fl)]))if(!seen.has(k)&&fl[k]!==prev[k])diff.push([k,fl[k]]);
-                let flagged=0;for(const k in fl)if(fl[k]!=='quest')flagged++;
-                prev=fl;out.push({diff,flagged});
+    // The board-changing moves as [{diff, flagged}], for the in-memory exporter.
+    const inMemoryVideoSteps=()=>{
+        const steps=[];
+        if(Array.isArray(v1FramesRef.current)&&v1FramesRef.current.length){
+            // Each recorded frame has a full flag snapshot; turn those into flag changes.
+            let prevFlags={};
+            for(const frame of v1FramesRef.current){
+                const diff=frame.diff.slice(),inDiff=new Set(diff.map(d=>d[0])),frameFlags=frame.flags||{};
+                for(const k of new Set([...Object.keys(prevFlags),...Object.keys(frameFlags)]))if(!inDiff.has(k)&&frameFlags[k]!==prevFlags[k])diff.push([k,frameFlags[k]]);
+                let flagged=0;for(const k in frameFlags)if(frameFlags[k]!=='quest')flagged++;
+                prevFlags=frameFlags;steps.push({diff,flagged});
             }
-            return out;
+            return steps;
         }
         // Mirrors replayMoveLog.
-        const log=moveLogRef.current,first=log[0],fc=first&&first[0]==='r'?[first[1],first[2]]:null;
-        const checker=mkChecker(hashSeed(activeSeed),fc),cells={};let flagged=0;
-        for(const e of log){
-            if(!e||e.length<3)continue;const[t,x,y]=e;
-            if(t==='r'){const{diff,gameOver}=applyReveal(cells,x,y,checker,hints.wrongFlags,true);if(diff.length)out.push({diff,flagged});if(gameOver)break}
-            else if(t==='f'){const{diff,flagsDelta,changed}=applyFlag(cells,x,y,true);if(changed){flagged+=flagsDelta;out.push({diff,flagged})}}
+        const log=moveLogRef.current,first=log[0],firstMove=first&&first[0]==='r'?[first[1],first[2]]:null;
+        const minefield=createMinefield(hashSeed(activeSeed),firstMove),board={};let flagged=0;
+        for(const entry of log){
+            if(!entry||entry.length<3)continue;const[type,x,y]=entry;
+            if(type==='r'){const{diff,gameOver}=applyReveal(board,x,y,minefield,hints.wrongFlags,true);if(diff.length)steps.push({diff,flagged});if(gameOver)break}
+            else if(type==='f'){const{diff,flagsDelta,changed}=applyFlag(board,x,y,true);if(changed){flagged+=flagsDelta;steps.push({diff,flagged})}}
         }
-        return out};
-    // Why the in-memory exporter can't run here, or null. Browsers only expose VideoEncoder on secure pages (https:// or
-    // localhost); on plain http:// timelapse.js falls back to a WebAssembly encoder, which this exporter doesn't have.
-    const videoExportBlocker=()=>{
+        return steps};
+    // Why WebCodecs video export can't run here, or null. Browsers only offer VideoEncoder on https:// or localhost.
+    const webCodecsMissingReason=()=>{
         if(typeof window.VideoEncoder!=='undefined'&&typeof window.VideoFrame!=='undefined'&&typeof window.Mp4Muxer!=='undefined')return null;
         if(window.isSecureContext===false)return`Video export on ${location.protocol}//${location.host} needs timelapse.js, which didn't load. Reload the page, or open it at localhost.`;
         if(typeof window.Mp4Muxer==='undefined')return'The video export library failed to load. Reload the page and try again.';
         return'Video export needs a browser with WebCodecs (try Chrome or Edge)';
     };
-    // Hard limit on an exported timelapse, in bytes. timelapse.js enforces the same figure.
-    const VIDEO_CAP=50e6;
-    // The original exporter, which draws on a canvas and holds the whole file in memory.
-    // Still used when timelapse.js didn't load, or its streamed export fails.
+    // The original timelapse exporter, which draws on a canvas and holds the whole file in memory. Used when
+    // timelapse.js didn't load, or its streamed export fails.
     const exportVideoInMemory=async steps=>{
         if(!steps.length){showStatus('No progress to export');return}
-        const blocked=videoExportBlocker();if(blocked){showStatus(blocked);return}
-        const fps=+uiSettings.tlFps===30?30:60,perFrame=[1,2,4,8,16,32].includes(+uiSettings.tlMovesPerFrame)?+uiSettings.tlMovesPerFrame:1;
-        const hold=fps,total=Math.ceil(steps.length/perFrame)+hold; // hold the final board for a second
-        if(total>4000&&!confirm(`This timelapse is ${fmtDuration(total/fps)} long (${steps.length} moves) and may take a while to encode. Continue?`))return;
+        const missing=webCodecsMissingReason();if(missing){showStatus(missing);return}
+        const fps=+uiSettings.tlFps===30?30:60,movesPerFrame=[1,2,4,8,16,32].includes(+uiSettings.tlMovesPerFrame)?+uiSettings.tlMovesPerFrame:1;
+        const holdFrames=fps,totalFrames=Math.ceil(steps.length/movesPerFrame)+holdFrames; // hold the final board for a second
+        if(totalFrames>4000&&!confirm(`This timelapse is ${formatDuration(totalFrames/fps)} long (${steps.length} moves) and may take a while to encode. Continue?`))return;
 
         setVideoExporting(true);setStatus('Exporting timelapse…');
-        const ex=beginExportTask('video','Exporting timelapse');let result=null,lastTick=0;
+        const job=beginExportTask('video','Exporting timelapse');let result=null,lastReport=0;
         try{
             let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
-            for(const st of steps)for(const[k]of st.diff){const c=k.indexOf(','),x=+k.slice(0,c),y=+k.slice(c+1);if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y}
-            const pad=2;minX-=pad;maxX+=pad;minY-=pad;maxY+=pad;
-            const w=maxX-minX+1,h=maxY-minY+1;
+            for(const step of steps)for(const[k]of step.diff){const c=k.indexOf(','),x=+k.slice(0,c),y=+k.slice(c+1);if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y}
+            const border=2;minX-=border;maxX+=border;minY-=border;maxY+=border;
+            const cols=maxX-minX+1,rows=maxY-minY+1;
 
-            // Cells shrink (down to 1px) so the frame stays within maxDim; a 4px floor made big boards too large to encode.
-            const maxDim=1920;
-            const sz=Math.max(1,Math.min(24,Math.floor(maxDim/Math.max(w,h))));
-            const footerH=Math.max(48,Math.round(h*sz*0.04/0.96));
-            let canvasW=Math.max(480,w*sz), canvasH=Math.max(480,h*sz+footerH);
+            // Cells shrink (down to 1px) to keep the frame within maxSide.
+            const maxSide=1920;
+            const cellPx=Math.max(1,Math.min(24,Math.floor(maxSide/Math.max(cols,rows))));
+            const footerH=Math.max(48,Math.round(rows*cellPx*0.04/0.96));
+            let canvasW=Math.max(480,cols*cellPx),canvasH=Math.max(480,rows*cellPx+footerH);
             if(canvasW%2)canvasW++;
             if(canvasH%2)canvasH++;
 
-            // The smallest H.264 level (up to 5.1) that fits this frame size and rate. Fixed levels 4.0/3.1
-            // rejected big boards, which then reported that the device couldn't encode video at all.
-            const mbs=Math.ceil(canvasW/16)*Math.ceil(canvasH/16);
-            const level=([[30,1620,40500],[31,3600,108000],[32,5120,216000],[40,8192,245760],[42,8704,522240],[50,22080,589824],[51,36864,983040]].find(([,fs,mbps])=>mbs<=fs&&mbs*fps<=mbps)||[51])[0].toString(16);
-            const codecCandidates=['4d00','42e0','6400'].map(p=>({type:'avc',codec:`avc1.${p}${level}`}));
-            let chosen=null;
-            for(const c of codecCandidates){
-                try{const support=await VideoEncoder.isConfigSupported({codec:c.codec,width:canvasW,height:canvasH,framerate:fps});
-                    if(support&&support.supported){chosen=c;break}}catch(e){console.error('Codec support check failed for',c.codec,e)}}
-            if(!chosen){result={ok:false,title:'This device cannot encode H.264 video'};return}
+            // The smallest H.264 level (up to 5.1) that fits this frame size and rate.
+            const macroblocks=Math.ceil(canvasW/16)*Math.ceil(canvasH/16);
+            const level=([[30,1620,40500],[31,3600,108000],[32,5120,216000],[40,8192,245760],[42,8704,522240],[50,22080,589824],[51,36864,983040]].find(([,maxPerFrame,maxPerSecond])=>macroblocks<=maxPerFrame&&macroblocks*fps<=maxPerSecond)||[51])[0].toString(16);
+            const codecCandidates=['4d00','42e0','6400'].map(profile=>({type:'avc',codec:`avc1.${profile}${level}`}));
+            let codec=null;
+            for(const candidate of codecCandidates){
+                try{const support=await VideoEncoder.isConfigSupported({codec:candidate.codec,width:canvasW,height:canvasH,framerate:fps});
+                    if(support&&support.supported){codec=candidate;break}}catch(e){console.error('Codec support check failed for',candidate.codec,e)}}
+            if(!codec){result={ok:false,title:'This device cannot encode H.264 video'};return}
 
             const canvas=document.createElement('canvas');canvas.width=canvasW;canvas.height=canvasH;
             const ctx=canvas.getContext('2d');
             const frameDurationUs=Math.round(1e6/fps);
             const encodeAt=async bitrate=>{
                 ctx.fillStyle='#0c0c1e';ctx.fillRect(0,0,canvasW,canvasH);
-                for(let y=minY;y<=maxY;y++)for(let x=minX;x<=maxX;x++)drawCellToCanvas(ctx,null,(x-minX)*sz,(y-minY)*sz,sz);
-                // Chunks are muxed once encoding is done. Some encoders (Firefox's) reorder frames and shift their
-                // timestamps, and WebCodecs reports only presentation times; chunks come in decode order, so the
-                // n-th decodes at the n-th presentation time, moved earlier by the deepest reordering.
-                const chunks=[];
-                let encErr=null;
+                for(let y=minY;y<=maxY;y++)for(let x=minX;x<=maxX;x++)drawCellToCanvas(ctx,null,(x-minX)*cellPx,(y-minY)*cellPx,cellPx);
+                const chunks=[]; // muxed once encoding is done
+                let encoderError=null;
                 const videoEncoder=new VideoEncoder({
                     output:(chunk,meta)=>{const data=new Uint8Array(chunk.byteLength);chunk.copyTo(data);chunks.push({data,type:chunk.type,pts:chunk.timestamp,meta})},
-                    error:e=>{encErr=encErr||e;console.error('Timelapse encode error',e)}
+                    error:e=>{encoderError=encoderError||e;console.error('Timelapse encode error',e)}
                 });
-                videoEncoder.configure({codec:chosen.codec,width:canvasW,height:canvasH,bitrate,framerate:fps});
-                let frame=0,done=0,cleared=0,flagged=0;
-                const emit=async()=>{
-                    drawFooterHUD(ctx,canvasW,canvasH,footerH,done,steps.length,cleared,flagged);
-                    const vf=new VideoFrame(canvas,{timestamp:frame*frameDurationUs,duration:frameDurationUs});
-                    videoEncoder.encode(vf,{keyFrame:frame%(fps*10)===0}); // a keyframe every 10s: seekable, and half the size of every 2s
-                    vf.close();frame++;
+                videoEncoder.configure({codec:codec.codec,width:canvasW,height:canvasH,bitrate,framerate:fps});
+                let frame=0,movesDone=0,cleared=0,flagged=0;
+                const emitFrame=async()=>{
+                    drawVideoFooter(ctx,canvasW,canvasH,footerH,movesDone,steps.length,cleared,flagged);
+                    const videoFrame=new VideoFrame(canvas,{timestamp:frame*frameDurationUs,duration:frameDurationUs});
+                    videoEncoder.encode(videoFrame,{keyFrame:frame%(fps*10)===0}); // a keyframe every 10s: seekable, and half the size of every 2s
+                    videoFrame.close();frame++;
                     if(videoEncoder.encodeQueueSize>4)await new Promise(r=>setTimeout(r,0));
-                    if(frame%25===0||frame===total)await new Promise(r=>setTimeout(r,0));
-                    const now=performance.now();if(now-lastTick>100||frame===total){lastTick=now;ex.onProgress({phase:'encode',done:frame,total})}
-                    if(encErr)throw encErr;
-                    if(ex.signal.aborted)throw new DOMException('Export cancelled','AbortError');
+                    if(frame%25===0||frame===totalFrames)await new Promise(r=>setTimeout(r,0));
+                    const now=performance.now();if(now-lastReport>100||frame===totalFrames){lastReport=now;job.onProgress({phase:'encode',done:frame,total:totalFrames})}
+                    if(encoderError)throw encoderError;
+                    if(job.signal.aborted)throw new DOMException('Export cancelled','AbortError');
                 };
-                for(const st of steps){
-                    for(const[k,v]of st.diff){if(v&&v[0]==='r')cleared++;const c=k.indexOf(',');drawCellToCanvas(ctx,v,(+k.slice(0,c)-minX)*sz,(+k.slice(c+1)-minY)*sz,sz)}
-                    flagged=st.flagged;done++;
-                    if(done%perFrame===0||done===steps.length)await emit();
+                for(const step of steps){
+                    for(const[k,v]of step.diff){if(v&&v[0]==='r')cleared++;const c=k.indexOf(',');drawCellToCanvas(ctx,v,(+k.slice(0,c)-minX)*cellPx,(+k.slice(c+1)-minY)*cellPx,cellPx)}
+                    flagged=step.flagged;movesDone++;
+                    if(movesDone%movesPerFrame===0||movesDone===steps.length)await emitFrame();
                 }
-                for(let j=0;j<hold;j++)await emit();
+                for(let j=0;j<holdFrames;j++)await emitFrame();
                 await videoEncoder.flush();videoEncoder.close();
-                if(encErr)throw encErr;
+                if(encoderError)throw encoderError;
                 const muxer=new Mp4Muxer.Muxer({
                     target:new Mp4Muxer.ArrayBufferTarget(),
-                    video:{codec:chosen.type,width:canvasW,height:canvasH},
+                    video:{codec:codec.type,width:canvasW,height:canvasH},
                     fastStart:'in-memory',firstTimestampBehavior:'offset'
                 });
-                const shown=chunks.map(c=>c.pts).sort((a,b)=>a-b);let lead=0;
-                chunks.forEach((c,n)=>{lead=Math.max(lead,shown[n]-c.pts)});
+                // Some encoders (Firefox's) reorder frames and shift their timestamps. Chunks come in decode order,
+                // so the n-th decodes at the n-th presentation time, moved earlier by the deepest reordering.
+                const presentationTimes=chunks.map(c=>c.pts).sort((a,b)=>a-b);let reorderLead=0;
+                chunks.forEach((c,n)=>{reorderLead=Math.max(reorderLead,presentationTimes[n]-c.pts)});
                 chunks.forEach((c,n)=>{
                     let meta=c.meta;
-                    // Firefox's decoder description is malformed in a way Windows' player can't read (see fixAvcC in game.js).
-                    if(meta&&meta.decoderConfig&&meta.decoderConfig.description&&window.fixAvcC)
-                        meta={...meta,decoderConfig:{...meta.decoderConfig,description:window.fixAvcC(meta.decoderConfig.description,c.data)}};
-                    muxer.addVideoChunkRaw(c.data,c.type,c.pts,frameDurationUs,meta,c.pts-(shown[n]-lead));
+                    if(meta&&meta.decoderConfig&&meta.decoderConfig.description&&window.repairAvcDecoderConfig)
+                        meta={...meta,decoderConfig:{...meta.decoderConfig,description:window.repairAvcDecoderConfig(meta.decoderConfig.description,c.data)}};
+                    muxer.addVideoChunkRaw(c.data,c.type,c.pts,frameDurationUs,meta,c.pts-(presentationTimes[n]-reorderLead));
                 });
                 muxer.finalize();
                 return muxer.target.buffer;
             };
-            // Never more bitrate than fits the cap over this video's length; screen content rarely needs even that.
-            let bitrate=Math.round(Math.min(20e6,Math.max(3e5,canvasW*canvasH*fps*0.02),VIDEO_CAP*8*0.9/(total/fps)));
+            // No more than fits the cap over this video's length; screen content rarely needs even that.
+            let bitrate=Math.round(Math.min(20e6,Math.max(3e5,canvasW*canvasH*fps*0.02),MAX_VIDEO_BYTES*8*0.9/(totalFrames/fps)));
             let buffer=await encodeAt(bitrate);
-            for(let attempt=1;attempt<3&&buffer.byteLength>VIDEO_CAP;attempt++){
-                ex.onProgress({phase:'retry',done:0,total});
-                bitrate=Math.floor(bitrate*VIDEO_CAP/buffer.byteLength*0.85);buffer=await encodeAt(bitrate);
+            for(let attempt=1;attempt<3&&buffer.byteLength>MAX_VIDEO_BYTES;attempt++){
+                job.onProgress({phase:'retry',done:0,total:totalFrames});
+                bitrate=Math.floor(bitrate*MAX_VIDEO_BYTES/buffer.byteLength*0.85);buffer=await encodeAt(bitrate);
             }
-            if(buffer.byteLength>VIDEO_CAP){result={ok:false,title:'The timelapse would be over 50 MB',text:'pick more moves per frame in Settings'};return}
+            if(buffer.byteLength>MAX_VIDEO_BYTES){result={ok:false,title:'The timelapse would be over 50 MB',text:'pick more moves per frame in Settings'};return}
             const blob=new Blob([buffer],{type:'video/mp4'});
-            const url=URL.createObjectURL(blob);
-            const a=document.createElement('a');
-            a.href=url;a.download=`${exportFileDate()}-minesweeper-seed-${activeSeed}-timelapse.mp4`;a.click();
-            setTimeout(()=>URL.revokeObjectURL(url),60000);
-            result={ok:true,title:'Timelapse video exported',text:`${fmtDuration(total/fps)}, ${canvasW}×${canvasH}, ${fmtSize(blob.size)}`};
+            downloadBlob(blob,`${exportFileDate()}-minesweeper-seed-${activeSeed}-timelapse.mp4`,60000);
+            result={ok:true,title:'Timelapse video exported',text:`${formatDuration(totalFrames/fps)}, ${canvasW}×${canvasH}, ${formatSize(blob.size)}`};
         }catch(err){
             if(err&&err.name==='AbortError')result={ok:false,title:'Timelapse export cancelled'};
             else{console.error(err);result={ok:false,title:'Video export failed',text:err&&err.message?err.message:'unknown error'}}
         }finally{
-            setVideoExporting(false);endExport(ex,result);
+            setVideoExporting(false);finishExport(job,result);
         }
     };
-    const handleExportVideo=async()=>{
+    const exportVideo=async()=>{
         if(videoExporting)return;
-        const v1Frames=Array.isArray(timelapseRef.current)&&timelapseRef.current.length?timelapseRef.current:null;
+        const v1Frames=Array.isArray(v1FramesRef.current)&&v1FramesRef.current.length?v1FramesRef.current:null;
         if(!v1Frames&&!moveLogRef.current.length){showStatus('No progress to export');return}
         // timelapse.js encodes with WebCodecs, or with WebAssembly where the browser hides VideoEncoder (plain http://).
-        const webCodecs=!videoExportBlocker();
-        const streamed=!!(window.Timelapse&&window.Mp4Muxer&&Mp4Muxer.StreamTarget&&(webCodecs||typeof WebAssembly!=='undefined'));
-        if(!streamed){const blocked=videoExportBlocker();if(blocked){showStatus(blocked);return}await exportVideoInMemory(legacyVideoSteps());return}
+        const hasWebCodecs=!webCodecsMissingReason();
+        const canStream=!!(window.Timelapse&&window.Mp4Muxer&&Mp4Muxer.StreamTarget&&(hasWebCodecs||typeof WebAssembly!=='undefined'));
+        if(!canStream){const missing=webCodecsMissingReason();if(missing){showStatus(missing);return}await exportVideoInMemory(inMemoryVideoSteps());return}
         setVideoExporting(true);setStatus('Exporting timelapse…');
-        const ex=beginExportTask('video','Exporting timelapse');
-        let failed=null,wake=null,result=null;
-        // Long exports run for minutes; stop the screen sleeping (and pausing the tab) meanwhile.
-        try{if(navigator.wakeLock)wake=await navigator.wakeLock.request('screen')}catch(e){console.error('Screen wake lock unavailable',e)}
+        const job=beginExportTask('video','Exporting timelapse');
+        let failure=null,wakeLock=null,result=null;
+        // Long exports run for minutes; keep the screen from sleeping (and pausing the tab) meanwhile.
+        try{if(navigator.wakeLock)wakeLock=await navigator.wakeLock.request('screen')}catch(e){console.error('Screen wake lock unavailable',e)}
         try{
-            // In multiplayer moveLogRef is the room's full log from the server, with every player's moves.
-            const src=v1Frames?{frames:v1Frames}:{seed:activeSeed,moveLog:moveLogRef.current.slice(),wrongFlags:!!hints.wrongFlags};
-            // Over 4000 frames the modal first offers a faster speed; without it, fall back to a confirm().
-            const out=await Timelapse.render(src,{fps:uiSettings.tlFps,movesPerFrame:uiSettings.tlMovesPerFrame,res:uiSettings.tlRes},{
-                signal:ex.signal,onProgress:ex.onProgress,
-                // The WebAssembly encoder (plain http://) is slow, so its speed picker also shows for anything over a minute to export.
-                confirmPlan:pl=>(pl.frames<=4000&&!(pl.slow&&pl.frames*pl.msPerFrame>60000))||(ex.hasModal?ex.askPlan(pl):confirm(`This timelapse is ${fmtDuration(pl.seconds)} long (${pl.moves} moves) and may take a while to encode. Continue?`))});
+            // In a room, moveLogRef holds the whole room's log, with every player's moves.
+            const source=v1Frames?{frames:v1Frames}:{seed:activeSeed,moveLog:moveLogRef.current.slice(),wrongFlags:!!hints.wrongFlags};
+            const out=await Timelapse.render(source,{fps:uiSettings.tlFps,movesPerFrame:uiSettings.tlMovesPerFrame,res:uiSettings.tlRes},{
+                signal:job.signal,onProgress:job.onProgress,
+                // Over 4000 frames, or a minute's work for the slow WebAssembly encoder, offer a faster speed first.
+                confirmPlan:plan=>(plan.frames<=4000&&!(plan.slow&&plan.frames*plan.msPerFrame>60000))||(job.hasModal?job.askPlan(plan):confirm(`This timelapse is ${formatDuration(plan.seconds)} long (${plan.moves} moves) and may take a while to encode. Continue?`))});
             if(!out)result={ok:false,title:'Timelapse export cancelled'};
             else if(out.empty)result={ok:false,title:'No progress to export'};
             else if(out.tooBig)result={ok:false,title:`The timelapse would be over ${Math.round(out.limit/1e6)} MB`,text:'pick more moves per frame in Settings'};
             else{
-                const url=URL.createObjectURL(out.blob);
-                const a=document.createElement('a');
-                a.href=url;a.download=`${exportFileDate()}-minesweeper-seed-${activeSeed}-timelapse.mp4`;a.click();
-                setTimeout(()=>URL.revokeObjectURL(url),60000);
-                result={ok:true,title:'Timelapse video exported',text:`${fmtDuration(out.seconds)}, ${out.width}×${out.height}, ${fmtSize(out.blob.size)}`};
+                downloadBlob(out.blob,`${exportFileDate()}-minesweeper-seed-${activeSeed}-timelapse.mp4`,60000);
+                result={ok:true,title:'Timelapse video exported',text:`${formatDuration(out.seconds)}, ${out.width}×${out.height}, ${formatSize(out.blob.size)}`};
             }
-        }catch(err){failed=err}
+        }catch(err){failure=err}
         finally{
             setVideoExporting(false);
-            if(failed&&!webCodecs)result={ok:false,title:'Video export failed',text:failed&&failed.message?failed.message:'unknown error'};
-            // A failure with WebCodecs goes straight on to the in-memory exporter, which brings up its own toast.
-            endExport(ex,failed&&webCodecs?null:result);
-            if(wake)wake.release().catch(e=>console.error('Screen wake lock release failed',e))}
-        if(failed&&webCodecs){console.error('Timelapse export failed, retrying with the in-memory exporter',failed);await exportVideoInMemory(legacyVideoSteps())}
-        else if(failed)console.error('Timelapse export failed',failed);
+            if(failure&&!hasWebCodecs)result={ok:false,title:'Video export failed',text:failure&&failure.message?failure.message:'unknown error'};
+            // With WebCodecs, a failure goes straight on to the in-memory exporter, which shows its own toast.
+            finishExport(job,failure&&hasWebCodecs?null:result);
+            if(wakeLock)wakeLock.release().catch(e=>console.error('Screen wake lock release failed',e))}
+        if(failure&&hasWebCodecs){console.error('Timelapse export failed, retrying with the in-memory exporter',failure);await exportVideoInMemory(inMemoryVideoSteps())}
+        else if(failure)console.error('Timelapse export failed',failure);
     };
 
+    // Restores the saved game, or starts the singleplayer game queued by leaving a room. Rooms load from the server.
     useEffect(()=>{
-        // In multiplayer mode, initial state comes from sync.php, not localStorage.
         if(mpRoomId)return;
-        // A singleplayer game started from the menu inside a room, carried across the page load.
-        let pending=null;
-        try{pending=JSON.parse(localStorage.getItem('minesweeper_pending_start')||'null')}catch(e){console.error('Failed to read pending start',e)}
-        if(pending){
+        let pendingStart=null;
+        try{pendingStart=JSON.parse(localStorage.getItem('minesweeper_pending_start')||'null')}catch(e){console.error('Failed to read pending start',e)}
+        if(pendingStart){
             localStorage.removeItem('minesweeper_pending_start');
-            if(pending.hints)setHints(migrateHints(pending.hints));
-            applySeed(typeof pending.seed==='string'?pending.seed:'');
+            if(pendingStart.hints)setHints(migrateHints(pendingStart.hints));
+            startNewGame(typeof pendingStart.seed==='string'?pendingStart.seed:'');
             return;
         }
         const saved=localStorage.getItem('minesweeper_save');
-        if(saved){try{const data=JSON.parse(saved);if(data&&(data.version===1||data.version===2||data.version===3)){if(loadGameState(data)){lastSave.current=saved;lastSaveSig.current=sigOfState(data);showStatus('Progress restored')}}}catch(e){console.error('Failed to restore saved game',e)}}
-    },[loadGameState,showStatus,mpRoomId]);
+        if(saved){try{const data=JSON.parse(saved);if(data&&(data.version===1||data.version===2||data.version===3)){if(loadSave(data)){savedSignatureRef.current=saveSignature(data);showStatus('Progress restored')}}}catch(e){console.error('Failed to restore saved game',e)}}
+    },[loadSave,showStatus,mpRoomId]);
 
+    // Auto-save. Not in a room: the server holds that game, and saving would race with its rebuilds.
     useEffect(()=>{
-        // Skip localStorage auto-save in multiplayer — the server holds canonical state and
-        // reloading in a room re-syncs from there. Auto-saving would race with sync rebuilds.
         if(mpRoomId)return;
         const t=setTimeout(()=>{
-            const state=getGameState();
-            if(!state.moveLog)return;
-            const sig=sigOfState(state);
-            if(sig===lastSaveSig.current)return;
-            const stateStr=JSON.stringify(state);
-            localStorage.setItem('minesweeper_save',stateStr);
-            lastSave.current=stateStr;
-            lastSaveSig.current=sig;
+            const save=buildSave();
+            if(!save.moveLog)return;
+            const signature=saveSignature(save);
+            if(signature===savedSignatureRef.current)return;
+            localStorage.setItem('minesweeper_save',JSON.stringify(save));
+            savedSignatureRef.current=signature;
             showStatus('Progress auto-saved');
         },1200);
-        return()=>clearTimeout(t)},[getGameState,showStatus,mpRoomId]);
+        return()=>clearTimeout(t)},[buildSave,showStatus,mpRoomId]);
 
-    const seedNum=useMemo(()=>hashSeed(activeSeed),[activeSeed]);
-    const checker=useMemo(()=>mkChecker(seedNum,firstClick),[seedNum,firstClick]);
+    const minefield=useMemo(()=>createMinefield(hashSeed(activeSeed),firstClick),[activeSeed,firstClick]);
 
     useEffect(()=>{
-        // Don't overwrite ?room=... in the URL with ?seed=... — the room is the active identifier here.
-        if(mpRoomId)return;
-        setURL(activeSeed);
+        if(mpRoomId)return; // the URL holds ?room= instead
+        setSeedInURL(activeSeed);
     },[activeSeed,mpRoomId]);
 
-    // --- Multiplayer: assign a stable playerId for this room ---
+    // --- Multiplayer: a stable playerId for this room ---
     useEffect(()=>{
         if(!mpRoomId){setMpPlayerId(null);return}
         const key='minesweeper_room_'+mpRoomId;
         let pid=localStorage.getItem(key);
-        // Same rule as the server's valid_id(). Also replaces non-hex ids stored by older builds,
-        // which the server rejects with 400 forever.
+        // The server's is_valid_id() rule; older builds stored ids it rejects.
         if(!pid||!/^[a-f0-9]{16,64}$/.test(pid)){
-            // 16 hex chars is enough — server tags moves with the first 8 for attribution.
-            // getRandomValues, not randomUUID: randomUUID only exists on HTTPS/localhost.
+            // getRandomValues rather than randomUUID, which only exists on https:// and localhost.
             pid=Array.from(crypto.getRandomValues(new Uint8Array(8)),b=>b.toString(16).padStart(2,'0')).join('');
             localStorage.setItem(key,pid);
         }
         setMpPlayerId(pid);
     },[mpRoomId]);
 
-    // --- Multiplayer: apply authoritative state from the server ---
-    // Two shapes:
-    //   (a) tail delta — newMoves is a list of entries to append to our canonical log.
-    //   (b) full rebuild — server sent moveLog + moveOwners because logRevision jumped
-    //       (an undo rewrote past entries and our tail cache is invalid).
-    // Either way we replay the canonical log to derive cells/moves/flags/firstClick/gameOver
-    // via the exact same path used for load-from-save.
-    const applyServerMoves=useCallback((seed,data,wrongFlags)=>{
+    // --- Multiplayer: applies the server's moves, then replays the log as a save load would ---
+    // newMoves extends our copy of the log; moveLog replaces it after an undo rewrote past entries.
+    const applyServerMoves=useCallback((seed,data,showWrongFlags)=>{
         const{newMoves,moveLog,moveOwners}=data;
-        let changed=false;
         if(typeof moveLog==='string'){
-            // Full rebuild path.
-            mpCanonicalMovesRef.current=decodeMoveLog(moveLog);
-            // moveOwners is parallel to canonical moves; split by ';' and preserve empty
-            // slots so indices line up. An empty input becomes [] (not ['']).
-            const trimmed=(typeof moveOwners==='string')?moveOwners.replace(/;$/,''):'';
-            mpMoveOwnersRef.current=trimmed.length===0?[]:trimmed.split(';');
-            changed=true;
+            mpServerLogRef.current=decodeMoveLog(moveLog);
+            const owners=(typeof moveOwners==='string')?moveOwners.replace(/;$/,''):'';
+            mpServerOwnersRef.current=owners.length===0?[]:owners.split(';'); // keeps empty slots, so indices line up
         }else if(newMoves&&newMoves.length){
             for(const m of newMoves){
                 if(!m||m.length<3)continue;
-                mpCanonicalMovesRef.current.push([m[0],m[1],m[2]]);
-                mpMoveOwnersRef.current.push(m[3]||'');
+                mpServerLogRef.current.push([m[0],m[1],m[2]]);
+                mpServerOwnersRef.current.push(m[3]||'');
             }
-            changed=true;
-        }
-        if(!changed)return;
-        // Our clicks made while this sync was in flight aren't in the server's log yet. Lay them on
-        // top (the server appends them in this same order next sync) so our own moves never blink out.
-        const canonical=mpCanonicalMovesRef.current.slice();
-        const owners=mpMoveOwnersRef.current.slice();
+        }else return;
+        // Our clicks the server hasn't taken yet go on top (it appends them in this order), so they never blink out.
+        const log=mpServerLogRef.current.slice();
+        const owners=mpServerOwnersRef.current.slice();
         for(const m of Net.pendingMoves()){
             if(m[0]==='u'){
-                // Same rule as sync.php: rewrite the latest reveal at that cell, unless it's already undone.
-                for(let i=canonical.length-1;i>=0;i--){
-                    const c=canonical[i];
-                    if((c[0]==='r'||c[0]==='u')&&c[1]===m[1]&&c[2]===m[2]){if(c[0]==='r')canonical[i]=['u',m[1],m[2]];break}
+                // Same rule as the server: rewrite the latest reveal of that cell, unless it's already undone.
+                for(let i=log.length-1;i>=0;i--){
+                    const entry=log[i];
+                    if((entry[0]==='r'||entry[0]==='u')&&entry[1]===m[1]&&entry[2]===m[2]){if(entry[0]==='r')log[i]=['u',m[1],m[2]];break}
                 }
-            }else{canonical.push([m[0],m[1],m[2]]);owners.push(m[3])}
+            }else{log.push([m[0],m[1],m[2]]);owners.push(m[3])}
         }
-        const out=replayMoveLog(seed,canonical,!!wrongFlags,null);
-        curFlagsRef.current=out.finalFlags;
-        timelapseRef.current=null;
-        moveLogRef.current=canonical;
-        setCells(out.cells);
-        setMoves(out.moves);
-        setFlags(out.flags);
-        setGameOver(out.gameOver);
-        setFirstClick(out.firstClick);
-        setClearedAtLastUndo(out.clearedAtLastUndo);
-        setUndoUsedCount(out.undoUsedCount);
-        fcProcessed.current=out.firstClick!==null;
-        // Attribution: whoever made the last 'r' entry in the canonical log caused this game-over.
-        if(out.gameOver){
-            let idx=-1;
-            for(let i=canonical.length-1;i>=0;i--){if(canonical[i][0]==='r'){idx=i;break}}
-            setMpGameOverBy(idx>=0?(owners[idx]||''):'');
+        const replay=replayMoveLog(seed,log,!!showWrongFlags);
+        flagMapRef.current=replay.finalFlags;
+        v1FramesRef.current=null;
+        moveLogRef.current=log;
+        setCells(replay.cells);
+        setMoves(replay.moves);
+        setFlags(replay.flags);
+        setGameOver(replay.gameOver);
+        setFirstClick(replay.firstClick);
+        setClearedAtLastUndo(replay.clearedAtLastUndo);
+        setUndoUsedCount(replay.undoUsedCount);
+        firstClickRevealedRef.current=replay.firstClick!==null;
+        if(replay.gameOver){
+            // Credited to whoever made the log's last reveal.
+            let lastReveal=-1;
+            for(let i=log.length-1;i>=0;i--){if(log[i][0]==='r'){lastReveal=i;break}}
+            setMpLoserTag(lastReveal>=0?(owners[lastReveal]||''):'');
         }else{
-            setMpGameOverBy(null);
+            setMpLoserTag(null);
         }
     },[]);
 
-    // --- Multiplayer: start the sync loop once we have a room + name + player id ---
+    // --- Multiplayer: the sync loop, once we have a room, name and player id ---
     useEffect(()=>{
         if(!mpRoomId||!mpName||!mpPlayerId)return;
-        mpNetActiveRef.current=true;
+        mpSyncingRef.current=true;
         mpRoundRef.current=null;
-        mpEventSeqRef.current=null;
+        mpLastEventSeqRef.current=null;
         Net.start({
             roomId:mpRoomId,
             playerId:mpPlayerId,
@@ -631,32 +570,29 @@ function App(){
                 setMpFounderId(data.founderId||null);
                 setMpResetVote(data.resetVote||null);
                 if(typeof data.round==='number'){
-                    // Someone started over. The replay below clears the board; this covers the
-                    // per-run bits it doesn't: a fresh leaderboard run and a recentred view.
+                    // Someone started over. The replay below clears the board; this starts a new leaderboard run and recentres.
                     if(mpRoundRef.current!==null&&data.round!==mpRoundRef.current){
-                        runIdRef.current=genRunId();
+                        runIdRef.current=newRunId();
                         setViewX(0);setViewY(0);
                         showStatus('New round started');
                     }
                     mpRoundRef.current=data.round;
                 }
                 if(Array.isArray(data.events)){
-                    // Announce each of the other players' actions once. The server only sends the
-                    // last few seconds of events; ones already there when we joined are skipped.
-                    const seen=mpEventSeqRef.current;
-                    let max=seen===null?0:seen;
+                    // Announces each of the other players' actions once, skipping ones from before we joined.
+                    const lastSeen=mpLastEventSeqRef.current;
+                    let newest=lastSeen===null?0:lastSeen;
                     for(const ev of data.events){
-                        if(ev.seq>max)max=ev.seq;
-                        if(seen===null||ev.seq<=seen||ev.by===mpPlayerId)continue;
+                        if(ev.seq>newest)newest=ev.seq;
+                        if(lastSeen===null||ev.seq<=lastSeen||ev.by===mpPlayerId)continue;
                         const msg={undo:'used an undo',restart:'restarted the board',new:'started a new game',load:'loaded a save file'}[ev.type];
                         if(msg)pushToast(`${ev.byName} ${msg}`);
                     }
-                    mpEventSeqRef.current=max;
+                    mpLastEventSeqRef.current=newest;
                 }
-                if(data.seed&&data.seed!==activeSeed){setActiveSeed(data.seed);setSeedStr(data.seed);}
+                if(data.seed&&data.seed!==activeSeed){setActiveSeed(data.seed);setSeedInput(data.seed);}
                 if(data.hints){
-                    // Cache the server value BEFORE calling setHints so the hint-sync effect
-                    // recognizes the incoming change as a no-op and doesn't bounce it back.
+                    // Recorded before setHints, so the hint-sync effect doesn't send the server's own hints back.
                     mpLastSyncedHintsRef.current={...data.hints};
                     setHints(prev=>({...prev,...data.hints}));
                 }
@@ -668,157 +604,131 @@ function App(){
                 if(e&&e.message==='HTTP 404')showStatus('Session not found. Check the code, or create a new session.');
             },
         });
-        return()=>{Net.stop();mpNetActiveRef.current=false};
-    // activeSeed intentionally omitted from deps — Net starts once per (room, name, playerId).
+        return()=>{Net.stop();mpSyncingRef.current=false};
+    // Started once per room, name and player id, so activeSeed is left out.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     },[mpRoomId,mpName,mpPlayerId,applyServerMoves,pushToast]);
 
-    // --- Multiplayer: track own cursor and forward at ~10 Hz to the server ---
+    // --- Multiplayer: our cursor, sent at up to 10 Hz ---
     useEffect(()=>{
         if(!mpRoomId||!containerRef.current)return;
         const el=containerRef.current;
-        let last=0,lastX=null,lastY=null;
-        const onMove=e=>{
+        let lastSentAt=0,lastX=null,lastY=null;
+        const onMouseMove=e=>{
             const now=Date.now();
-            if(now-last<100)return;
-            const rect=el.getBoundingClientRect();
-            const cols=Math.floor(rect.width/cellSize),rows=Math.floor(rect.height/cellSize);
-            const padX=(rect.width-cols*cellSize)/2,padY=(rect.height-rows*cellSize)/2;
-            const mx=(e.clientX-rect.left-padX)/cellSize;
-            const my=(e.clientY-rect.top-padY)/cellSize;
-            const wx=viewX-Math.floor(cols/2)+mx,wy=viewY-Math.floor(rows/2)+my;
-            if(lastX!==null&&Math.abs(wx-lastX)<0.1&&Math.abs(wy-lastY)<0.1)return;
-            last=now;lastX=wx;lastY=wy;
-            Net.sendCursor(wx,wy,cellSize);
+            if(now-lastSentAt<100)return;
+            const[x,y]=screenToWorld(el.getBoundingClientRect(),e.clientX,e.clientY,cellSize,viewX,viewY);
+            if(lastX!==null&&Math.abs(x-lastX)<0.1&&Math.abs(y-lastY)<0.1)return;
+            lastSentAt=now;lastX=x;lastY=y;
+            Net.sendCursor(x,y,cellSize);
         };
-        el.addEventListener('mousemove',onMove);
-        return()=>el.removeEventListener('mousemove',onMove);
+        el.addEventListener('mousemove',onMouseMove);
+        return()=>el.removeEventListener('mousemove',onMouseMove);
     },[mpRoomId,cellSize,viewX,viewY]);
 
-    // Keep the server-side display name in sync if the user changes it mid-session.
     useEffect(()=>{if(mpName&&Net.isRunning())Net.updateName(mpName)},[mpName]);
 
-    // Push our viewport center to Net every time it changes so other players' "go to"
-    // navigation lands them on the same view we're looking at.
+    // Our view centre, so other players can jump to what we're looking at.
     useEffect(()=>{
         if(!mpRoomId||!Net.isRunning())return;
         Net.setView(viewX,viewY);
     },[viewX,viewY,mpRoomId]);
 
-    // Push local hint changes to the room. Skips echoes from the server by comparing
-    // against the last-synced snapshot (set in onSync just before setHints).
+    // Shares local hint changes with the room, skipping the ones that just came from the server.
     useEffect(()=>{
-        if(!mpRoomId||!mpNetActiveRef.current)return;
+        if(!mpRoomId||!mpSyncingRef.current)return;
         const shared={
             wrongFlags:hints.wrongFlags,pulseNeighbors:hints.pulseNeighbors,
             undoEnabled:hints.undoEnabled,undoMode:hints.undoMode,chordFlag:hints.chordFlag,
         };
-        const last=mpLastSyncedHintsRef.current;
-        if(last){
-            let same=true;
-            for(const k in shared){if(shared[k]!==last[k]){same=false;break}}
-            if(same)return;
-        }
+        const lastSynced=mpLastSyncedHintsRef.current;
+        if(lastSynced&&Object.keys(shared).every(k=>shared[k]===lastSynced[k]))return;
         Net.sendHints(shared);
     },[hints,mpRoomId]);
 
     useEffect(()=>{
         if(!containerRef.current)return;let t;
-        const ro=new ResizeObserver(entries=>{clearTimeout(t);t=setTimeout(()=>{
+        const observer=new ResizeObserver(entries=>{clearTimeout(t);t=setTimeout(()=>{
             const{width,height}=entries[0].contentRect;
             if(width>0&&height>0)setContainerSize({w:Math.floor(width),h:Math.floor(height)})},50)});
-        ro.observe(containerRef.current);return()=>{ro.disconnect();clearTimeout(t)}},[]);
+        observer.observe(containerRef.current);return()=>{observer.disconnect();clearTimeout(t)}},[]);
 
-    useEffect(()=>{const c=Math.floor(containerSize.w/cellSize),r=Math.floor(containerSize.h/cellSize);
-        if(c>0&&r>0)setGridDims({cols:c,rows:r})},[containerSize,cellSize]);
+    useEffect(()=>{const cols=Math.floor(containerSize.w/cellSize),rows=Math.floor(containerSize.h/cellSize);
+        if(cols>0&&rows>0)setGridDims({cols,rows})},[containerSize,cellSize]);
 
     useEffect(()=>{
-        const handler=e=>{
+        const onKeyDown=e=>{
             if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT')return;
             const pan={ArrowUp:[0,-1],ArrowDown:[0,1],ArrowLeft:[-1,0],ArrowRight:[1,0],w:[0,-1],s:[0,1],a:[-1,0],d:[1,0]};
             if(pan[e.key]){e.preventDefault();const[dx,dy]=pan[e.key];setViewX(v=>v+dx*3);setViewY(v=>v+dy*3);return}
-            if(e.key==='Escape'&&viewMode==='Fullscreen'){setViewMode(prevMode.current||'Medium');return}
-            if(e.ctrlKey&&(e.key==='='||e.key==='+')){e.preventDefault();setCellSize(s=>Math.min(ZMAX,s+ZSTEP))}
-            if(e.ctrlKey&&e.key==='-'){e.preventDefault();setCellSize(s=>Math.max(ZMIN,s-ZSTEP))}};
-        window.addEventListener('keydown',handler);return()=>window.removeEventListener('keydown',handler)},[viewMode]);
+            if(e.key==='Escape'&&viewMode==='Fullscreen'){setViewMode(viewBeforeFullscreenRef.current||'Medium');return}
+            if(e.ctrlKey&&(e.key==='='||e.key==='+')){e.preventDefault();setCellSize(s=>Math.min(CELL_SIZE_MAX,s+CELL_SIZE_STEP))}
+            if(e.ctrlKey&&e.key==='-'){e.preventDefault();setCellSize(s=>Math.max(CELL_SIZE_MIN,s-CELL_SIZE_STEP))}};
+        window.addEventListener('keydown',onKeyDown);return()=>window.removeEventListener('keydown',onKeyDown)},[viewMode]);
 
+    // Zooms around the cursor: the world point under it stays put.
     const handleWheel=useCallback(e=>{
         e.preventDefault();const rect=containerRef.current?.getBoundingClientRect();if(!rect)return;
-        const cols=Math.floor(rect.width/cellSize),rows=Math.floor(rect.height/cellSize);
-        const padX=(rect.width-cols*cellSize)/2,padY=(rect.height-rows*cellSize)/2;
-        const mx=(e.clientX-rect.left-padX)/cellSize,my=(e.clientY-rect.top-padY)/cellSize;
-        const sX=viewX-Math.floor(cols/2),sY=viewY-Math.floor(rows/2);
-        const cux=sX+mx,cuy=sY+my;
-        const nz=e.deltaY<0?Math.min(ZMAX,cellSize+ZSTEP):Math.max(ZMIN,cellSize-ZSTEP);
-        if(nz===cellSize)return;
-        const nC=Math.floor(rect.width/nz),nR=Math.floor(rect.height/nz);
-        const nPx=(rect.width-nC*nz)/2,nPy=(rect.height-nR*nz)/2;
-        const nmx=(e.clientX-rect.left-nPx)/nz,nmy=(e.clientY-rect.top-nPy)/nz;
-        setCellSize(nz);setViewX(Math.round(cux-nmx+nC/2));setViewY(Math.round(cuy-nmy+nR/2))},[cellSize,viewX,viewY]);
+        const[worldX,worldY]=screenToWorld(rect,e.clientX,e.clientY,cellSize,viewX,viewY);
+        const newSize=e.deltaY<0?Math.min(CELL_SIZE_MAX,cellSize+CELL_SIZE_STEP):Math.max(CELL_SIZE_MIN,cellSize-CELL_SIZE_STEP);
+        if(newSize===cellSize)return;
+        const newCols=Math.floor(rect.width/newSize),newRows=Math.floor(rect.height/newSize);
+        const cursorCol=(e.clientX-rect.left-(rect.width-newCols*newSize)/2)/newSize,cursorRow=(e.clientY-rect.top-(rect.height-newRows*newSize)/2)/newSize;
+        setCellSize(newSize);setViewX(Math.round(worldX-cursorCol+newCols/2));setViewY(Math.round(worldY-cursorRow+newRows/2))},[cellSize,viewX,viewY]);
 
-    const applySeed=s=>{const ns=s.trim()||rndSeed();runIdRef.current=genRunId();setSeedStr(ns);setActiveSeed(ns);setCells({});setGameOver(false);setMoves(0);setFlags(0);setViewX(0);setViewY(0);setCellSize(uiSettings.defaultCellSize);setFirstClick(null);fcProcessed.current=false;timelapseRef.current=null;moveLogRef.current=[];curFlagsRef.current={};setClearedAtLastUndo(null);setUndoUsedCount(0);setShowGameOverModal(false);localStorage.removeItem('minesweeper_save');lastSave.current='';lastSaveSig.current=''};
-    const restart=()=>{runIdRef.current=genRunId();setCells({});setGameOver(false);setMoves(0);setFlags(0);setViewX(0);setViewY(0);setCellSize(uiSettings.defaultCellSize);setFirstClick(null);fcProcessed.current=false;timelapseRef.current=null;moveLogRef.current=[];curFlagsRef.current={};setClearedAtLastUndo(null);setUndoUsedCount(0);setShowGameOverModal(false);localStorage.removeItem('minesweeper_save');lastSave.current='';lastSaveSig.current=''};
-    const changeView=v=>{if(v==='Fullscreen')prevMode.current=viewMode;setViewMode(v)};
+    const clearBoard=()=>{runIdRef.current=newRunId();setCells({});setGameOver(false);setMoves(0);setFlags(0);setViewX(0);setViewY(0);setCellSize(uiSettings.defaultCellSize);setFirstClick(null);firstClickRevealedRef.current=false;v1FramesRef.current=null;moveLogRef.current=[];flagMapRef.current={};setClearedAtLastUndo(null);setUndoUsedCount(0);setShowGameOverModal(false);localStorage.removeItem('minesweeper_save');savedSignatureRef.current=''};
+    const startNewGame=seed=>{const s=seed.trim()||randomSeed();setSeedInput(s);setActiveSeed(s);clearBoard()};
+    const changeView=v=>{if(v==='Fullscreen')viewBeforeFullscreenRef.current=viewMode;setViewMode(v)};
 
     const undoInfinite=hints.undoEnabled&&hints.undoMode==='infinite';
     const undoStack=hints.undoEnabled&&hints.undoMode==='stack';
-    const undoStackCount=Math.max(0,Math.floor(clearedCount/1000)+1-undoUsedCount);
+    const undoStackCount=Math.max(0,Math.floor(clearedCount/CLEARED_PER_UNDO)+1-undoUsedCount);
     const undoAvailable=hints.undoEnabled&&(
         undoInfinite||
-        (undoStack?undoStackCount>0:(clearedAtLastUndo===null||clearedCount-clearedAtLastUndo>=1000))
+        (undoStack?undoStackCount>0:(clearedAtLastUndo===null||clearedCount-clearedAtLastUndo>=CLEARED_PER_UNDO))
     );
     const clearedUntilNextUndo=undoStack
-        ?(1000-(clearedCount%1000))
-        :(clearedAtLastUndo===null?0:Math.max(0,1000-(clearedCount-clearedAtLastUndo)));
+        ?(CLEARED_PER_UNDO-(clearedCount%CLEARED_PER_UNDO))
+        :(clearedAtLastUndo===null?0:Math.max(0,CLEARED_PER_UNDO-(clearedCount-clearedAtLastUndo)));
 
     const mpIsFounder=!!(mpRoomId&&mpPlayerId&&mpFounderId===mpPlayerId);
-    // Restart ('restart', same seed), start a new game ('new', seed defaults to random), or in a room,
-    // replace the board with a save file ('load', its seed + encoded moveLog).
-    // Asks first when there's something to lose: a game in progress, or a lost game an undo could
-    // still rescue. In a room the founder decides alone; anyone else's request goes to a vote
-    // that needs 51% of the room (enforced server-side).
+    // kind: 'restart' (same seed), 'new' (seed defaults to random), or in a room 'load' (a save's seed and moveLog).
+    // Asks first if there's progress to lose. In a room the founder decides alone; anyone else starts a vote.
     const startOver=(kind,seed,loadLog)=>{
-        const atStake=moveLogRef.current.length>0&&(!gameOver||undoAvailable);
-        const act=kind==='new'?'start a new game with a new seed':kind==='load'?'replace the board with this save file':'restart this board';
+        const progressAtStake=moveLogRef.current.length>0&&(!gameOver||undoAvailable);
+        const action=kind==='new'?'start a new game with a new seed':kind==='load'?'replace the board with this save file':'restart this board';
         if(!mpRoomId){
-            if(atStake&&!confirm(`Are you sure you want to ${act}? Your current progress will be lost.`))return;
-            if(kind==='new')applySeed(seed||rndSeed());else restart();
+            if(progressAtStake&&!confirm(`Are you sure you want to ${action}? Your current progress will be lost.`))return;
+            if(kind==='new')startNewGame(seed||randomSeed());else clearBoard();
             return;
         }
-        if(!mpNetActiveRef.current)return;
-        const needsVote=atStake&&!mpIsFounder;
-        if(atStake&&!confirm(needsVote
-            ?`Start a vote to ${act}? At least 51% of the room must agree.`
-            :`Are you sure you want to ${act} for everyone in the room? Current progress will be lost.`))return;
-        Net.requestReset(kind,kind==='new'?(seed||rndSeed()):kind==='load'?seed:null,needsVote,loadLog);
+        if(!mpSyncingRef.current)return;
+        const needsVote=progressAtStake&&!mpIsFounder;
+        if(progressAtStake&&!confirm(needsVote
+            ?`Start a vote to ${action}? At least 51% of the room must agree.`
+            :`Are you sure you want to ${action} for everyone in the room? Current progress will be lost.`))return;
+        Net.requestReset(kind,kind==='new'?(seed||randomSeed()):kind==='load'?seed:null,needsVote,loadLog);
         showStatus(needsVote?'Vote started — waiting for the room':'Starting over…');
     };
-    // In a room a save file replaces the shared board (loading it locally would just be
-    // overwritten by the next sync). Older saves without a move log can't be replayed there.
+    // In a room a save file replaces the shared board; loaded locally, the next sync would overwrite it.
     const importIntoRoom=data=>{
         const entries=data&&data.version===3?decodeMoveLog(typeof data.moveLog==='string'?data.moveLog:'')
             :data&&data.version===2&&Array.isArray(data.moveLog)?data.moveLog:null;
         if(!entries){showStatus('This save is too old to load into a room');return}
-        // Rooms only accept plain seeds; the server would change anything else, and the moves
-        // would then replay on a different board.
+        // Rooms only take plain seeds; the server would change anything else, and the moves would land on another board.
         const seed=String(data.activeSeed||'');
         if(!/^[A-Za-z0-9_-]{1,32}$/.test(seed)){showStatus("This save's seed can't be used in a room");return}
-        const clean=entries.filter(m=>Array.isArray(m)&&['r','f','u'].includes(m[0])&&Number.isInteger(m[1])&&Number.isInteger(m[2]));
-        startOver('load',seed,encodeMoveLog(clean));
+        const validMoves=entries.filter(m=>Array.isArray(m)&&['r','f','u'].includes(m[0])&&Number.isInteger(m[1])&&Number.isInteger(m[2]));
+        startOver('load',seed,encodeMoveLog(validMoves));
     };
 
-    useEffect(()=>{
-        if(gameOver)setShowGameOverModal(true);
-        // In multiplayer, a shared undo can flip gameOver back to false — close the
-        // modal automatically for players who weren't the one clicking Undo. In
-        // single-player, gameOver never transitions back this way from replay.
-        else setShowGameOverModal(false);
-    },[gameOver]);
+    // In a room, someone else's undo can end the game-over, so the modal follows gameOver both ways.
+    useEffect(()=>{setShowGameOverModal(!!gameOver)},[gameOver]);
 
     const addLeaderboardEntry=useCallback(entry=>{
         setLeaderboard(prev=>{
-            const filtered=prev.filter(e=>e.runId!==entry.runId);
-            const next=[...filtered,entry].sort((a,b)=>b.cleared-a.cleared||a.moves-b.moves).slice(0,8);
+            const others=prev.filter(e=>e.runId!==entry.runId);
+            const next=[...others,entry].sort((a,b)=>b.cleared-a.cleared||a.moves-b.moves).slice(0,8);
             try{localStorage.setItem('minesweeper_leaderboard',JSON.stringify(next))}catch(e){console.error('Failed to save leaderboard',e)}
             return next;
         });
@@ -837,87 +747,85 @@ function App(){
         }
     },[gameOver]);
 
-    const doUndo=useCallback(()=>{
+    // Rewrites the reveal that hit the mine as an undone one ('u') and replays.
+    const undoLosingMove=useCallback(()=>{
         if(!undoAvailable)return;
         const log=moveLogRef.current;
-        // Undo the reveal that hit the mine, found by replay. It's usually the last entry, but not
-        // always: a quick second click, or other players' clicks in a room, can be logged after it.
-        const fi=replayMoveLog(activeSeed,log,hints.wrongFlags,null).fatalIndex;
-        if(fi<0)return;
-        const[,fx,fy]=log[fi];
-        // In a room, tell the server to rewrite that fatal 'r' entry as 'u'. The next
-        // sync response will echo a full moveLog rebuild (logRevision bumps), which
-        // reconciles across all clients. We still apply the change locally for zero-latency
-        // feedback; until the server has it, applyServerMoves lays the pending 'u' over its log.
-        if(mpNetActiveRef.current)Net.sendMove(['u',fx,fy]);
-        log[fi]=['u',fx,fy];
-        const out=replayMoveLog(activeSeed,log,hints.wrongFlags,null);
-        curFlagsRef.current=out.finalFlags;
-        timelapseRef.current=null;
-        setCells(out.cells);setMoves(out.moves);setFlags(out.flags);setGameOver(out.gameOver);setFirstClick(out.firstClick);
-        setClearedAtLastUndo(out.clearedAtLastUndo);
-        setUndoUsedCount(out.undoUsedCount);
-        fcProcessed.current=out.firstClick!==null;
-        setShowGameOverModal(!!out.gameOver);
-        setMpGameOverBy(null);
-        showStatus(mpNetActiveRef.current?'Undo applied — syncing with room':'Free undo used');
+        const losingIndex=replayMoveLog(activeSeed,log,hints.wrongFlags).losingMoveIndex;
+        if(losingIndex<0)return;
+        const[,x,y]=log[losingIndex];
+        // In a room the server rewrites its log too and every client rebuilds; until then applyServerMoves keeps ours.
+        if(mpSyncingRef.current)Net.sendMove(['u',x,y]);
+        log[losingIndex]=['u',x,y];
+        const replay=replayMoveLog(activeSeed,log,hints.wrongFlags);
+        flagMapRef.current=replay.finalFlags;
+        v1FramesRef.current=null;
+        setCells(replay.cells);setMoves(replay.moves);setFlags(replay.flags);setGameOver(replay.gameOver);setFirstClick(replay.firstClick);
+        setClearedAtLastUndo(replay.clearedAtLastUndo);
+        setUndoUsedCount(replay.undoUsedCount);
+        firstClickRevealedRef.current=replay.firstClick!==null;
+        setShowGameOverModal(!!replay.gameOver);
+        setMpLoserTag(null);
+        showStatus(mpSyncingRef.current?'Undo applied — syncing with room':'Free undo used');
     },[undoAvailable,activeSeed,hints.wrongFlags,showStatus]);
 
-
-    const hoverInfo=useMemo(()=>{
-        if(!hover||gameOver)return{hl:new Set(),ck:null,pulse:new Set()};
-        const[hx,hy]=hover;const k=`${hx},${hy}`;const st=cells[k];
-        if(!st||st[0]!=='r')return{hl:new Set(),ck:null,pulse:new Set()};
-        const c=+st[1];if(!c)return{hl:new Set(),ck:null,pulse:new Set()};
-        let fc=0;const unrev=[];
-        for(const[dx,dy]of NB){const nk=`${hx+dx},${hy+dy}`;const ns=cells[nk];if(ns==='flag')fc++;else if(!ns||ns==='quest')unrev.push(nk)}
-        if(fc===c)return{hl:new Set(unrev),ck:k,pulse:new Set()};
-        if(hints.pulseNeighbors)return{hl:new Set(),ck:null,pulse:new Set(unrev)};
-        return{hl:new Set(),ck:null,pulse:new Set()};
-    },[hover,cells,gameOver,hints.pulseNeighbors]);
+    // Hovering a number highlights the cells a chord would open, or with the pulse hint, its hidden neighbours.
+    const hoverHighlights=useMemo(()=>{
+        const none={chordTargets:new Set(),chordCell:null,pulseTargets:new Set()};
+        if(!hoveredCell||gameOver)return none;
+        const[hx,hy]=hoveredCell,key=`${hx},${hy}`,state=cells[key];
+        if(!state||state[0]!=='r')return none;
+        const count=+state[1];if(!count)return none;
+        let flagged=0;const hidden=[];
+        for(const[dx,dy]of NEIGHBOR_OFFSETS){const nkey=`${hx+dx},${hy+dy}`,neighbor=cells[nkey];if(neighbor==='flag')flagged++;else if(!neighbor||neighbor==='quest')hidden.push(nkey)}
+        if(flagged===count)return{...none,chordTargets:new Set(hidden),chordCell:key};
+        if(hints.pulseNeighbors)return{...none,pulseTargets:new Set(hidden)};
+        return none;
+    },[hoveredCell,cells,gameOver,hints.pulseNeighbors]);
 
     const revealCell=useCallback((x,y)=>{
+        // The first click only places the minefield; the effect below reveals it.
         if(firstClick===null){
             moveLogRef.current.push(['r',x,y]);
-            if(mpNetActiveRef.current)Net.sendMove(['r',x,y]);
+            if(mpSyncingRef.current)Net.sendMove(['r',x,y]);
             setFirstClick([x,y]);return;
         }
         setCells(prev=>{
-            const{next,diff,movesDelta,gameOver:go}=applyReveal(prev,x,y,checker,hints.wrongFlags);
+            const{next,diff,movesDelta,gameOver:hitMine}=applyReveal(prev,x,y,minefield,hints.wrongFlags);
             if(next===prev)return prev;
             moveLogRef.current.push(['r',x,y]);
-            if(mpNetActiveRef.current)Net.sendMove(['r',x,y]);
-            recordFrame(timelapseRef,diff,curFlagsRef.current);
+            if(mpSyncingRef.current)Net.sendMove(['r',x,y]);
+            recordV1Frame(v1FramesRef,diff,flagMapRef.current);
             if(movesDelta)setMoves(m=>m+movesDelta);
-            if(go)setGameOver(true);
+            if(hitMine)setGameOver(true);
             return next;
         });
-    },[firstClick,checker,hints.wrongFlags]);
+    },[firstClick,minefield,hints.wrongFlags]);
 
     useEffect(()=>{
-        if(firstClick&&!fcProcessed.current){fcProcessed.current=true;
+        if(firstClick&&!firstClickRevealedRef.current){firstClickRevealedRef.current=true;
             const[x,y]=firstClick;
             setCells(prev=>{
-                const{next,diff,movesDelta}=applyReveal(prev,x,y,checker,hints.wrongFlags);
+                const{next,diff,movesDelta}=applyReveal(prev,x,y,minefield,hints.wrongFlags);
                 if(next===prev)return prev;
-                recordFrame(timelapseRef,diff,curFlagsRef.current);
+                recordV1Frame(v1FramesRef,diff,flagMapRef.current);
                 if(movesDelta)setMoves(m=>m+movesDelta);
                 return next;
             });}
-    },[firstClick,checker,hints.wrongFlags]);
+    },[firstClick,minefield,hints.wrongFlags]);
 
     const flagCell=useCallback((x,y)=>{
         setCells(prev=>{
-            const st=prev[`${x},${y}`];
-            if(hints.chordFlag&&st&&st[0]==='r'){
+            const state=prev[`${x},${y}`];
+            if(hints.chordFlag&&state&&state[0]==='r'){
                 const{next,diff,flagsDelta,changed}=applyChordFlag(prev,x,y);
                 if(changed){
                     for(const[k]of diff){
                         const[fx,fy]=k.split(',').map(Number);
                         moveLogRef.current.push(['f',fx,fy]);
-                        if(mpNetActiveRef.current)Net.sendMove(['f',fx,fy]);
+                        if(mpSyncingRef.current)Net.sendMove(['f',fx,fy]);
                     }
-                    applyDiffToFlags(curFlagsRef.current,diff);
+                    applyDiffToFlags(flagMapRef.current,diff);
                     if(flagsDelta)setFlags(f=>f+flagsDelta);
                     return next;
                 }
@@ -925,63 +833,60 @@ function App(){
             const{next,diff,flagsDelta,changed}=applyFlag(prev,x,y);
             if(!changed)return prev;
             moveLogRef.current.push(['f',x,y]);
-            if(mpNetActiveRef.current)Net.sendMove(['f',x,y]);
-            applyDiffToFlags(curFlagsRef.current,diff);
+            if(mpSyncingRef.current)Net.sendMove(['f',x,y]);
+            applyDiffToFlags(flagMapRef.current,diff);
             if(flagsDelta)setFlags(f=>f+flagsDelta);
             return next;
         });
     },[hints.chordFlag]);
 
-    const onH=useCallback((x,y)=>setHover([x,y]),[]);
-    const onL=useCallback(()=>setHover(null),[]);
+    const hoverCell=useCallback((x,y)=>setHoveredCell([x,y]),[]);
+    const clearHover=useCallback(()=>setHoveredCell(null),[]);
 
     const{cols,rows}=gridDims;
-    const startX=viewX-Math.floor(cols/2),startY=viewY-Math.floor(rows/2);
+    const leftX=viewX-Math.floor(cols/2),topY=viewY-Math.floor(rows/2);
     const gridW=cols*cellSize,gridH=rows*cellSize;
-    const zoomPct=Math.round(cellSize/ZDEF*100);
+    const zoomPct=Math.round(cellSize/CELL_SIZE_DEFAULT*100);
 
-    const grid=useMemo(()=>{
-        const r=[];
+    const gridCells=useMemo(()=>{
+        const out=[];
         for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
-            const cx=startX+col,cy=startY+row;const key=`${cx},${cy}`;
-            r.push(<Cell key={key} x={cx} y={cy} state={cells[key]||null} go={gameOver}
-                         hl={hoverInfo.hl.has(key)} cr={hoverInfo.ck===key} pulse={hoverInfo.pulse.has(key)} sz={cellSize}
-                         onR={revealCell} onF={flagCell} onH={onH} onL={onL}/>)}
-        return r},[startX,startY,rows,cols,cells,gameOver,cellSize,revealCell,flagCell,onH,onL,hoverInfo]);
+            const x=leftX+col,y=topY+row,key=`${x},${y}`;
+            out.push(<Cell key={key} x={x} y={y} state={cells[key]||null} gameOver={gameOver}
+                         chordTarget={hoverHighlights.chordTargets.has(key)} chordReady={hoverHighlights.chordCell===key} pulse={hoverHighlights.pulseTargets.has(key)} size={cellSize}
+                         onReveal={revealCell} onFlag={flagCell} onHover={hoverCell} onLeave={clearHover}/>)}
+        return out},[leftX,topY,rows,cols,cells,gameOver,cellSize,revealCell,flagCell,hoverCell,clearHover,hoverHighlights]);
 
-    const isFS=viewMode==='Fullscreen';
+    const isFullscreen=viewMode==='Fullscreen';
     // Export progress shows as a toast; a long timelapse's speed picker still needs the modal.
-    const exportToast=!!(exportTask&&!exportTask.plan&&window.ExportProgressToast);
-    const cStyle=isFS?{width:'100vw',height:'calc(100vh - 42px)'}:{width:VIEWS[viewMode]?.w||800,height:VIEWS[viewMode]?.h||600,borderRadius:8,border:'1px solid #2a2a4a',boxShadow:'0 4px 30px rgba(0,0,0,.5)'};
+    const showExportToast=!!(exportTask&&!exportTask.plan&&window.ExportProgressToast);
+    const containerStyle=isFullscreen?{width:'100vw',height:'calc(100vh - 42px)'}:{width:VIEW_SIZES[viewMode]?.w||800,height:VIEW_SIZES[viewMode]?.h||600,borderRadius:8,border:'1px solid #2a2a4a',boxShadow:'0 4px 30px rgba(0,0,0,.5)'};
 
-    // --- Multiplayer helpers used by header buttons and the start menu ---
-    // Resolves true only if the link actually reached the clipboard.
+    // --- Multiplayer helpers for the header and start menu ---
+    // Resolves true only if the link reached the clipboard.
     const copyLink=useCallback(async url=>{
-        let ok=false;
+        let copied=false;
         if(navigator.clipboard&&navigator.clipboard.writeText){
-            try{await navigator.clipboard.writeText(url);ok=true}catch(e){console.error('Clipboard write failed',e)}
+            try{await navigator.clipboard.writeText(url);copied=true}catch(e){console.error('Clipboard write failed',e)}
         }
-        // navigator.clipboard only exists on HTTPS/localhost — plain-HTTP deploys need the legacy path.
-        if(!ok){
-            const ta=document.createElement('textarea');
-            ta.value=url;ta.setAttribute('readonly','');
-            ta.style.cssText='position:fixed;top:0;left:0;opacity:0';
-            document.body.appendChild(ta);
-            ta.focus();ta.select();ta.setSelectionRange(0,url.length); // setSelectionRange for iOS Safari
-            try{ok=document.execCommand('copy')}catch(e){console.error('Legacy copy failed',e)}
-            document.body.removeChild(ta);
+        // navigator.clipboard only exists on https:// and localhost.
+        if(!copied){
+            const textarea=document.createElement('textarea');
+            textarea.value=url;textarea.setAttribute('readonly','');
+            textarea.style.cssText='position:fixed;top:0;left:0;opacity:0';
+            document.body.appendChild(textarea);
+            textarea.focus();textarea.select();textarea.setSelectionRange(0,url.length); // setSelectionRange for iOS Safari
+            try{copied=document.execCommand('copy')}catch(e){console.error('Legacy copy failed',e)}
+            document.body.removeChild(textarea);
         }
-        if(ok)showStatus('Invite link copied');
+        if(copied)showStatus('Invite link copied');
         else window.prompt('Copy this invite link:',url);
-        return ok;
+        return copied;
     },[showStatus]);
     const handleCopyInvite=useCallback(()=>copyLink(window.location.href),[copyLink]);
-    const handleLeaveRoom=useCallback(()=>{
-        // Bounce back to the base URL — drops ?room, single-player takes over from there.
-        window.location.href=window.location.pathname;
-    },[]);
-    // Makes a room on the server and keeps our founder playerId for it. Resolves to the roomId.
-    // moveLog (encoded) starts the room from an existing board instead of a blank one.
+    const handleLeaveRoom=useCallback(()=>{window.location.href=window.location.pathname},[]);
+    // Creates a room and keeps our founder playerId for it. Resolves to the roomId. An encoded moveLog starts it
+    // from an existing board.
     const createRoom=useCallback(async(seed,roomHints,moveLog)=>{
         const res=await fetch('./php/create-room.php',{
             method:'POST',
@@ -999,38 +904,34 @@ function App(){
 
     // --- Start menu actions ---
     const openMenu=step=>setStartMenu({step,closable:true});
-    // The board already on screen, which a new session can start from. Only seeds that survive the
-    // server's sanitize_seed() unchanged can carry moves into a room.
+    // A new session can start from the board on screen, if its seed survives the server's sanitize_seed() unchanged.
     const menuCurrentGame=moveLogRef.current.length
         ?{moves:moveLogRef.current.length,seed:activeSeed,shareable:/^[A-Za-z0-9_-]{1,32}$/.test(activeSeed)}
         :null;
     const menuStartSingle=(seed,newHints)=>{
         if(mpRoomId){
-            // Leaving the room reloads the page, so queue the new game for the other side of it.
+            // Leaving the room reloads the page, so the new game is queued for after it.
             if(localStorage.getItem('minesweeper_save')&&!confirm('Leave this session and start a new singleplayer game? Your saved singleplayer game will be replaced.'))return;
             localStorage.setItem('minesweeper_pending_start',JSON.stringify({seed,hints:newHints}));
             window.location.href=window.location.pathname;
             return;
         }
-        const atStake=moveLogRef.current.length>0&&(!gameOver||undoAvailable);
-        if(atStake&&!confirm('Start a new game? Your current progress will be lost.'))return;
+        const progressAtStake=moveLogRef.current.length>0&&(!gameOver||undoAvailable);
+        if(progressAtStake&&!confirm('Start a new game? Your current progress will be lost.'))return;
         setHints(newHints);
-        applySeed(seed);
+        startNewGame(seed);
         setStartMenu(null);
     };
     const menuCreateSession=(name,seed,roomHints,fromCurrent)=>{
         localStorage.setItem('minesweeper_name',name);setMpName(name);
         return createRoom(seed,roomHints,fromCurrent?encodeMoveLog(moveLogRef.current):null);
     };
-    // Name of whoever caused the current game-over (looked up by matching the short
-    // owner tag against the first 8 hex of each player's full id).
     const mpKillerName=useMemo(()=>{
-        if(!gameOver||!mpGameOverBy)return null;
-        for(const pid in mpPlayers){if(pid.startsWith(mpGameOverBy))return mpPlayers[pid].name||'Player'}
+        if(!gameOver||!mpLoserTag)return null;
+        for(const pid in mpPlayers){if(pid.startsWith(mpLoserTag))return mpPlayers[pid].name||'Player'}
         return null;
-    },[gameOver,mpGameOverBy,mpPlayers]);
-    const mpKillerIsSelf=!!(mpGameOverBy&&mpSelfIdShort&&mpGameOverBy===mpSelfIdShort);
-    // Jump our viewport to another player's viewport center, so we see the same board region they do.
+    },[gameOver,mpLoserTag,mpPlayers]);
+    const mpKillerIsSelf=!!(mpLoserTag&&mpOwnerTag&&mpLoserTag===mpOwnerTag);
     const handleGoToPlayer=useCallback((x,y)=>{setViewX(Math.round(x));setViewY(Math.round(y))},[]);
 
     return(
@@ -1038,7 +939,7 @@ function App(){
             {startMenu&&<StartModal
                 initialStep={startMenu.step}
                 hints={hints}
-                initialSeed={startMenu.closable?rndSeed():seedStr}
+                initialSeed={startMenu.closable?randomSeed():seedInput}
                 initialName={mpName}
                 currentGame={menuCurrentGame}
                 inRoom={!!mpRoomId}
@@ -1060,19 +961,19 @@ function App(){
                 undoStack={undoStack}
                 undoStackCount={undoStackCount}
                 videoExporting={videoExporting}
-                onUndo={doUndo}
+                onUndo={undoLosingMove}
                 onRestart={()=>startOver('restart')}
                 onNewSeed={()=>startOver('new')}
-                onExportImage={()=>handleExportImage(true)}
-                onExportVideo={()=>handleExportVideo()}
+                onExportImage={()=>exportImage(true)}
+                onExportVideo={()=>exportVideo()}
                 onClose={()=>setShowGameOverModal(false)}
                 leaderboard={leaderboard}
                 lastEntryDate={lastEntryDate}
                 killerName={mpKillerName}
                 killerIsSelf={mpKillerIsSelf}
             />}
-            {(mpRoomId||isFS||exportToast)&&<ToastStack toasts={isFS&&statusToast&&!exportToast?[...mpToasts,statusToast]:mpToasts} vote={mpRoomId?mpResetVote:null} selfId={mpPlayerId} onVote={(id,yes)=>Net.vote(id,yes)}>
-                {exportToast&&<window.ExportProgressToast key="export" task={exportTask}/>}
+            {(mpRoomId||isFullscreen||showExportToast)&&<ToastStack toasts={isFullscreen&&statusToast&&!showExportToast?[...mpToasts,statusToast]:mpToasts} vote={mpRoomId?mpResetVote:null} selfId={mpPlayerId} onVote={(id,yes)=>Net.vote(id,yes)}>
+                {showExportToast&&<window.ExportProgressToast key="export" task={exportTask}/>}
             </ToastStack>}
             {showSettings&&<SettingsModal
                 hints={hints} setHints={setHints}
@@ -1081,7 +982,7 @@ function App(){
                 cellSize={cellSize} setCellSize={setCellSize}
                 onClose={()=>setShowSettings(false)}
             />}
-            {exportTask&&!exportToast&&!exportTask.result&&window.ExportProgressModal&&<window.ExportProgressModal task={exportTask}/>}
+            {exportTask&&!showExportToast&&!exportTask.result&&window.ExportProgressModal&&<window.ExportProgressModal task={exportTask}/>}
             <div className="hdr" style={{position:'relative',paddingRight:46}}>
                 {uiSettings.showLeaderboard&&<LeaderboardDropdown entries={leaderboard} currentScore={clearedCount}/>}
                 {mpRoomId
@@ -1091,17 +992,17 @@ function App(){
                     </>
                     :<button className="hb" onClick={()=>openMenu('create')} title="Create a session from this game and invite someone">👥 Play with a friend</button>}
                 <div className="flex items-center gap-1">
-                    {uiSettings.showSeed&&uiSettings.showSeedBox&&<input className="hi" value={seedStr} onChange={e=>setSeedStr(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')startOver('new',seedStr)}} placeholder="seed" disabled={!!mpRoomId}/>}
+                    {uiSettings.showSeed&&uiSettings.showSeedBox&&<input className="hi" value={seedInput} onChange={e=>setSeedInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')startOver('new',seedInput)}} placeholder="seed" disabled={!!mpRoomId}/>}
                     <button onClick={()=>openMenu('choose')} className="hb pr" title="New singleplayer or multiplayer game, restart, or new seed">☰ Menu</button>
                     {/* Undo stays reachable after closing the game-over popup to inspect the board. */}
-                    {gameOver&&undoAvailable&&<button onClick={doUndo} className="hb pr" title="Undo the move that hit the mine">↩ Undo</button>}
-                    {uiSettings.showSeed&&uiSettings.showLockBtn&&<button className={`hb ${locked?'act':''}`} onClick={()=>setLocked(l=>!l)}>{locked?'🔒':'🔓'}</button>}
+                    {gameOver&&undoAvailable&&<button onClick={undoLosingMove} className="hb pr" title="Undo the move that hit the mine">↩ Undo</button>}
+                    {uiSettings.showSeed&&uiSettings.showLockBtn&&<button className={`hb ${seedLocked?'act':''}`} onClick={()=>setSeedLocked(l=>!l)}>{seedLocked?'🔒':'🔓'}</button>}
                 </div>
-                <GameDropdown onExport={handleExport} onImport={handleImport} onClear={clearSave} onExportImage={handleExportImage} onExportVideo={handleExportVideo} videoExporting={videoExporting}/>
+                <GameDropdown onExport={downloadSave} onImport={importSaveFile} onClear={clearSave} onExportImage={exportImage} onExportVideo={exportVideo} videoExporting={videoExporting}/>
                 {uiSettings.showZoom&&<div className="flex items-center gap-1">
-                    <button className="hb" onClick={()=>setCellSize(s=>Math.max(ZMIN,s-ZSTEP))}>−</button>
+                    <button className="hb" onClick={()=>setCellSize(s=>Math.max(CELL_SIZE_MIN,s-CELL_SIZE_STEP))}>−</button>
                     <span className="text-gray-400 text-xs w-9 text-center">{zoomPct}%</span>
-                    <button className="hb" onClick={()=>setCellSize(s=>Math.min(ZMAX,s+ZSTEP))}>+</button>
+                    <button className="hb" onClick={()=>setCellSize(s=>Math.min(CELL_SIZE_MAX,s+CELL_SIZE_STEP))}>+</button>
                 </div>}
                 {uiSettings.showCoords&&<span className="text-gray-500 text-xs">({viewX},{viewY})</span>}
                 {uiSettings.showScores&&<>
@@ -1120,14 +1021,14 @@ function App(){
                 <button className="hb" title="Settings" style={{position:'absolute',right:8,top:'50%',transform:'translateY(-50%)'}} onClick={()=>setShowSettings(true)}>⚙</button>
             </div>
             <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',width:'100%',overflow:'hidden'}}>
-                <div ref={containerRef} className="game-container" style={{...cStyle,position:'relative'}} onContextMenu={e=>e.preventDefault()} onWheel={handleWheel}>
+                <div ref={containerRef} className="game-container" style={{...containerStyle,position:'relative'}} onContextMenu={e=>e.preventDefault()} onWheel={handleWheel}>
                     <div style={{display:'grid',gridTemplateColumns:`repeat(${cols},${cellSize}px)`,gridTemplateRows:`repeat(${rows},${cellSize}px)`,width:gridW,height:gridH}}>
-                        {grid}
+                        {gridCells}
                     </div>
                     {mpRoomId&&<CursorOverlay players={mpPlayers} selfId={mpPlayerId} viewX={viewX} viewY={viewY} cellSize={cellSize} containerSize={containerSize}/>}
                 </div>
             </div>
-            {!isFS&&<div className="text-xs py-1" style={{color:'#9ca3af'}}>WASD/Arrows pan · Scroll zoom · Right-click flag · Click numbers to chord · First click always safe{status&&<span style={{color:'#c4b5fd',marginLeft:8}}>{status}</span>}</div>}
+            {!isFullscreen&&<div className="text-xs py-1" style={{color:'#9ca3af'}}>WASD/Arrows pan · Scroll zoom · Right-click flag · Click numbers to chord · First click always safe{status&&<span style={{color:'#c4b5fd',marginLeft:8}}>{status}</span>}</div>}
         </div>);
 }
 
