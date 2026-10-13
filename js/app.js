@@ -1,12 +1,14 @@
 // app.js – App component and ReactDOM render (JSX, compiled by Babel in the browser)
 const{useState,useCallback,useMemo,useEffect,useRef}=React;
 
-const DEFAULT_UI_SETTINGS={showArrows:true,showScores:true,showLeaderboard:true,showUndo:true,showZoom:true,showCoords:true,showSeed:true,showSeedBox:true,showLockBtn:true,defaultCellSize:CELL_SIZE_DEFAULT,exportRes:'auto',tlMovesPerFrame:1,tlFps:60,tlRes:'auto',myColor:'',cursorSee:'off',cursorSend:'normal',pingQuality:'full'};
+const DEFAULT_UI_SETTINGS={showArrows:true,showScores:true,showLeaderboard:true,showUndo:true,showZoom:true,showCoords:true,showSeed:true,showSeedBox:true,showLockBtn:true,defaultCellSize:CELL_SIZE_DEFAULT,exportRes:'auto',tlMovesPerFrame:1,tlFps:60,tlRes:'auto',myColor:'',cursorSee:'off',cursorSend:'normal',pingQuality:'full',boardFx:'full'};
 const CLEARED_PER_UNDO=1000;
 const MAX_VIDEO_BYTES=50e6; // timelapse.js has the same limit
 const PING_SHOW_MS=4000,MAX_PINGS_SHOWN=10,PING_COOLDOWN_MS=400; // middle-click pings in a room
 // Others' cursors by rate setting: how long each move glides, and how often Infrequent redraws them.
 const CURSOR_GLIDE_MS={infrequent:0,normal:120,frequent:100},CURSOR_INFREQUENT_MS=1000;
+const NO_HIGHLIGHTS={chordTargets:new Set(),chordCell:null,pulseTargets:new Set()}; // shared, so the grid's memo holds
+const POP_MAX_CELLS=400; // an update revealing more cells than this skips their pop-in animation
 
 // The world position (in fractional cells) under a screen point, for a view centred on viewX, viewY.
 function screenToWorld(rect,clientX,clientY,cellSize,viewX,viewY){
@@ -39,14 +41,18 @@ function App(){
     const[cellSize,setCellSize]=useState(CELL_SIZE_DEFAULT);
     const[viewX,setViewX]=useState(0);
     const[viewY,setViewY]=useState(0);
-    const[cells,setCells]=useState({});
-    const[gameOver,setGameOver]=useState(false);
-    const[moves,setMoves]=useState(0);
-    const[flags,setFlags]=useState(0);
+    // The board (cells, counters, minefield) is changed in place, so a move costs only what it changes; boardVersion
+    // re-renders after each change.
+    const boardRef=useRef(null);
+    if(!boardRef.current)boardRef.current=createBoard(initialSeed,false);
+    const[boardVersion,setBoardVersion]=useState(0);
+    // revealed: how many cells the change revealed; a rebuilt board passes Infinity.
+    const bumpBoard=useCallback((revealed=0)=>{if(window.setCellPop)setCellPop(revealed<=POP_MAX_CELLS);setBoardVersion(v=>v+1)},[]);
+    useEffect(()=>{if(window.setCellPop)setCellPop(true)},[boardVersion]);
+    const{cells,gameOver,moves,flags,cleared:clearedCount,clearedAtLastUndo,undoUsedCount}=boardRef.current;
     const[hoveredCell,setHoveredCell]=useState(null);
     const[gridDims,setGridDims]=useState({cols:20,rows:15});
     const[containerSize,setContainerSize]=useState({w:800,h:600});
-    const[firstClick,setFirstClick]=useState(null);
     const[hints,setHints]=useState(()=>{try{const s=localStorage.getItem('minesweeper_hints');if(s)return migrateHints(JSON.parse(s))}catch(e){console.error('Failed to read saved hints',e)}return migrateHints(null)});
     const[uiSettings,setUiSettings]=useState(()=>{try{const s=localStorage.getItem('minesweeper_ui');if(s){
         const saved=JSON.parse(s);
@@ -60,8 +66,6 @@ function App(){
     const[showSettings,setShowSettings]=useState(false);
     const[status,setStatus]=useState('');
     const[videoExporting,setVideoExporting]=useState(false);
-    const[clearedAtLastUndo,setClearedAtLastUndo]=useState(null);
-    const[undoUsedCount,setUndoUsedCount]=useState(0);
     const[showGameOverModal,setShowGameOverModal]=useState(false);
     const[leaderboard,setLeaderboard]=useState(()=>{
         try{const s=localStorage.getItem('minesweeper_leaderboard');const arr=s?JSON.parse(s):[];return Array.isArray(arr)?arr:[]}catch(e){console.error('Failed to read saved leaderboard',e);return[]}
@@ -72,10 +76,8 @@ function App(){
     const v1FramesRef=useRef(null); // a version 1 save's recorded frames; null when the move log has the history
     const moveLogRef=useRef([]);
     const flagMapRef=useRef({});
-    const clearedCount=useMemo(()=>Object.values(cells).filter(s=>s&&s[0]==='r').length,[cells]);
     const containerRef=useRef(null);
     const viewBeforeFullscreenRef=useRef('Medium');
-    const firstClickRevealedRef=useRef(false);
 
     // --- Multiplayer state (inert outside a room) ---
     const mpRoomId=useMemo(()=>new URLSearchParams(window.location.search).get('room'),[]);
@@ -145,7 +147,7 @@ function App(){
 
     const buildSave=useCallback(()=>({
         version:3,activeSeed,locked:seedLocked,viewMode,cellSize,viewX,viewY,hints,moveLog:encodeMoveLog(moveLogRef.current),timestamp:Date.now(),runId:runIdRef.current
-    }),[activeSeed,seedLocked,viewMode,cellSize,viewX,viewY,hints,cells,gameOver,moves,flags,firstClick]);
+    }),[activeSeed,seedLocked,viewMode,cellSize,viewX,viewY,hints,boardVersion]);
 
     // A save's viewMode is ignored: the minesweeper_view preference wins.
     const loadSave=useCallback(data=>{
@@ -160,34 +162,30 @@ function App(){
             runIdRef.current=data.runId||newRunId();
             moveLogRef.current=log;
             v1FramesRef.current=null;
-            const replay=replayMoveLog(data.activeSeed,log,!!(data.hints&&data.hints.wrongFlags));
-            flagMapRef.current=replay.finalFlags;
-            setCells(replay.cells);setMoves(replay.moves);setFlags(replay.flags);setGameOver(replay.gameOver);setFirstClick(replay.firstClick);
-            setClearedAtLastUndo(replay.clearedAtLastUndo);
-            setUndoUsedCount(replay.undoUsedCount);
-            setShowGameOverModal(!!replay.gameOver);
-            firstClickRevealedRef.current=log.length>0;
+            flagMapRef.current={};
+            boardRef.current=boardFromLog(data.activeSeed,log,!!(data.hints&&data.hints.wrongFlags));
+            bumpBoard(Infinity);
+            setShowGameOverModal(boardRef.current.gameOver);
             return true;
         }
         if(data.version===1){
             setActiveSeed(data.activeSeed);setSeedInput(data.activeSeed);setSeedLocked(data.locked);
             setCellSize(data.cellSize);setViewX(data.viewX);setViewY(data.viewY);
-            setCells(data.cells);setGameOver(data.gameOver);setMoves(data.moves);setFlags(data.flags);
-            setFirstClick(data.firstClick);setHints(migrateHints(data.hints));
+            setHints(migrateHints(data.hints));
+            boardRef.current=createBoard(data.activeSeed,!!(data.hints&&data.hints.wrongFlags),
+                {cells:data.cells||{},firstClick:data.firstClick||null,moves:data.moves||0,flags:data.flags||0,gameOver:!!data.gameOver});
+            bumpBoard(Infinity);
             runIdRef.current=data.runId||newRunId();
             const hasCells=!!(data.cells&&Object.keys(data.cells).length>0);
-            firstClickRevealedRef.current=hasCells;
             moveLogRef.current=[];
             const flagMap=extractFlags(data.cells||{});
             flagMapRef.current=flagMap;
             v1FramesRef.current=hasCells?[{diff:Object.entries(data.cells),flags:flagMap}]:null;
-            setClearedAtLastUndo(null);
-            setUndoUsedCount(0);
             setShowGameOverModal(!!data.gameOver);
             return true;
         }
         return false;
-    },[]);
+    },[bumpBoard]);
 
     const downloadSave=()=>{
         const save=buildSave();
@@ -217,7 +215,7 @@ function App(){
     // The original full-canvas image export, for when mapimage.js didn't load, CompressionStream is missing, or the
     // streamed export fails.
     const exportImageViaCanvas=(withStats,cellPx)=>{
-        const keys=Object.keys(cells);
+        const cells=boardRef.current.cells,keys=Object.keys(cells);
         let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
         keys.forEach(k=>{const[x,y]=k.split(',').map(Number);minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y)});
         const border=2;
@@ -317,7 +315,7 @@ function App(){
             }
             return steps;
         }
-        // Mirrors replayMoveLog.
+        // Mirrors applyLogEntry in game.js.
         const log=moveLogRef.current,first=log[0],firstMove=first&&first[0]==='r'?[first[1],first[2]]:null;
         const minefield=createMinefield(hashSeed(activeSeed),firstMove),board={};let flagged=0;
         for(const entry of log){
@@ -504,8 +502,6 @@ function App(){
         },1200);
         return()=>clearTimeout(t)},[buildSave,showStatus,mpRoomId]);
 
-    const minefield=useMemo(()=>createMinefield(hashSeed(activeSeed),firstClick),[activeSeed,firstClick]);
-
     useEffect(()=>{
         if(mpRoomId)return; // the URL holds ?room= instead
         setSeedInURL(activeSeed);
@@ -525,10 +521,12 @@ function App(){
         setMpPlayerId(pid);
     },[mpRoomId]);
 
-    // --- Multiplayer: applies the server's moves, then replays the log as a save load would ---
-    // newMoves extends our copy of the log; moveLog replaces it after an undo rewrote past entries.
-    const applyServerMoves=useCallback((seed,data,showWrongFlags)=>{
-        const{newMoves,moveLog,moveOwners}=data;
+    // --- Multiplayer: applies the server's moves to the board ---
+    // newMoves extends our copy of the log; moveLog replaces it after an undo rewrote past entries. Our clicks the
+    // server hasn't taken yet stay on top (it appends them in this order), so they never blink out. ownTag credits a
+    // loss to us when the losing reveal is one of those.
+    const applyServerMoves=useCallback((seed,data,showWrongFlags,ownTag)=>{
+        const{newMoves,moveLog,moveOwners}=data,added=[];
         if(typeof moveLog==='string'){
             mpServerLogRef.current=decodeMoveLog(moveLog);
             const owners=(typeof moveOwners==='string')?moveOwners.replace(/;$/,''):'';
@@ -536,43 +534,22 @@ function App(){
         }else if(newMoves&&newMoves.length){
             for(const m of newMoves){
                 if(!m||m.length<3)continue;
-                mpServerLogRef.current.push([m[0],m[1],m[2]]);
+                const entry=[m[0],m[1],m[2]];
+                mpServerLogRef.current.push(entry);
                 mpServerOwnersRef.current.push(m[3]||'');
+                added.push(entry);
             }
-        }else return;
-        // Our clicks the server hasn't taken yet go on top (it appends them in this order), so they never blink out.
-        const log=mpServerLogRef.current.slice();
-        const owners=mpServerOwnersRef.current.slice();
-        for(const m of Net.pendingMoves()){
-            if(m[0]==='u'){
-                // Same rule as the server: rewrite the latest reveal of that cell, unless it's already undone.
-                for(let i=log.length-1;i>=0;i--){
-                    const entry=log[i];
-                    if((entry[0]==='r'||entry[0]==='u')&&entry[1]===m[1]&&entry[2]===m[2]){if(entry[0]==='r')log[i]=['u',m[1],m[2]];break}
-                }
-            }else{log.push([m[0],m[1],m[2]]);owners.push(m[3])}
         }
-        const replay=replayMoveLog(seed,log,!!showWrongFlags);
-        flagMapRef.current=replay.finalFlags;
+        const before=boardRef.current,clearedBefore=before.cleared;
+        const synced=syncBoard(before,moveLogRef.current,mpServerLogRef.current,added,typeof moveLog==='string',seed,!!showWrongFlags,Net.pendingMoves());
+        if(!synced)return;
+        boardRef.current=synced.board;
+        moveLogRef.current=synced.log;
         v1FramesRef.current=null;
-        moveLogRef.current=log;
-        setCells(replay.cells);
-        setMoves(replay.moves);
-        setFlags(replay.flags);
-        setGameOver(replay.gameOver);
-        setFirstClick(replay.firstClick);
-        setClearedAtLastUndo(replay.clearedAtLastUndo);
-        setUndoUsedCount(replay.undoUsedCount);
-        firstClickRevealedRef.current=replay.firstClick!==null;
-        if(replay.gameOver){
-            // Credited to whoever made the log's last reveal.
-            let lastReveal=-1;
-            for(let i=log.length-1;i>=0;i--){if(log[i][0]==='r'){lastReveal=i;break}}
-            setMpLoserTag(lastReveal>=0?(owners[lastReveal]||''):'');
-        }else{
-            setMpLoserTag(null);
-        }
-    },[]);
+        const{gameOver:lost,losingMoveIndex:i}=synced.board,owners=mpServerOwnersRef.current;
+        setMpLoserTag(lost?(i<owners.length?owners[i]:ownTag)||'':null);
+        bumpBoard(synced.board===before?synced.board.cleared-clearedBefore:Infinity);
+    },[bumpBoard]);
 
     // --- Multiplayer: the sync loop, once we have a room, name and player id ---
     useEffect(()=>{
@@ -581,6 +558,11 @@ function App(){
         mpRoundRef.current=null;
         mpLastEventSeqRef.current=null;
         mpPlayersShownRef.current={meta:'',cursors:'',cursorsAt:0};
+        // Net starts again from move 0, so our copy of the server's log starts over and the board is rebuilt from it.
+        mpServerLogRef.current=[];
+        mpServerOwnersRef.current=[];
+        boardRef.current.dirty=true;
+        const batch=ReactDOM.unstable_batchedUpdates||(f=>f()); // one render per sync
         Net.start({
             roomId:mpRoomId,
             playerId:mpPlayerId,
@@ -588,7 +570,7 @@ function App(){
             color:uiSettingsRef.current.myColor||'',
             onStatus:s=>{setMpStatus(s);if(s==='connected')setMpBackoff(null)},
             onBackoff:info=>setMpBackoff(info),
-            onSync:data=>{
+            onSync:data=>batch(()=>{
                 if(data.players){
                     // Redrawn only for a change: names, colours and views at once, others' cursors at the chosen rate
                     // (Infrequent: once a second) and not at all while they're off.
@@ -639,10 +621,10 @@ function App(){
                 if(data.hints){
                     // Recorded before setHints, so the hint-sync effect doesn't send the server's own hints back.
                     mpLastSyncedHintsRef.current={...data.hints};
-                    setHints(prev=>({...prev,...data.hints}));
+                    setHints(prev=>Object.keys(data.hints).every(k=>prev[k]===data.hints[k])?prev:{...prev,...data.hints});
                 }
-                applyServerMoves(data.seed||activeSeed,data,data.hints&&data.hints.wrongFlags);
-            },
+                applyServerMoves(data.seed||activeSeed,data,data.hints&&data.hints.wrongFlags,mpPlayerId.slice(0,8));
+            }),
             onError:e=>{
                 console.error('sync error',e);
                 // A mistyped session code, or a session that expired (rooms are deleted after a day idle).
@@ -752,8 +734,8 @@ function App(){
         const cursorCol=(e.clientX-rect.left-(rect.width-newCols*newSize)/2)/newSize,cursorRow=(e.clientY-rect.top-(rect.height-newRows*newSize)/2)/newSize;
         setCellSize(newSize);setViewX(Math.round(worldX-cursorCol+newCols/2));setViewY(Math.round(worldY-cursorRow+newRows/2))},[cellSize,viewX,viewY]);
 
-    const clearBoard=()=>{runIdRef.current=newRunId();setCells({});setGameOver(false);setMoves(0);setFlags(0);setViewX(0);setViewY(0);setCellSize(uiSettings.defaultCellSize);setFirstClick(null);firstClickRevealedRef.current=false;v1FramesRef.current=null;moveLogRef.current=[];flagMapRef.current={};setClearedAtLastUndo(null);setUndoUsedCount(0);setShowGameOverModal(false);localStorage.removeItem('minesweeper_save');savedSignatureRef.current=''};
-    const startNewGame=seed=>{const s=seed.trim()||randomSeed();setSeedInput(s);setActiveSeed(s);clearBoard()};
+    const clearBoard=(seed=activeSeed)=>{runIdRef.current=newRunId();boardRef.current=createBoard(seed,false);bumpBoard();setViewX(0);setViewY(0);setCellSize(uiSettings.defaultCellSize);v1FramesRef.current=null;moveLogRef.current=[];flagMapRef.current={};setShowGameOverModal(false);localStorage.removeItem('minesweeper_save');savedSignatureRef.current=''};
+    const startNewGame=seed=>{const s=seed.trim()||randomSeed();setSeedInput(s);setActiveSeed(s);clearBoard(s)};
     const changeView=v=>{if(v==='Fullscreen')viewBeforeFullscreenRef.current=viewMode;setViewMode(v)};
 
     const undoInfinite=hints.undoEnabled&&hints.undoMode==='infinite';
@@ -826,28 +808,26 @@ function App(){
     // Rewrites the reveal that hit the mine as an undone one ('u') and replays.
     const undoLosingMove=useCallback(()=>{
         if(!undoAvailable)return;
-        const log=moveLogRef.current;
-        const losingIndex=replayMoveLog(activeSeed,log,hints.wrongFlags).losingMoveIndex;
+        const log=moveLogRef.current,losingIndex=boardRef.current.losingMoveIndex;
         if(losingIndex<0)return;
         const[,x,y]=log[losingIndex];
         // In a room the server rewrites its log too and every client rebuilds; until then applyServerMoves keeps ours.
         if(mpSyncingRef.current)Net.sendMove(['u',x,y]);
         log[losingIndex]=['u',x,y];
-        const replay=replayMoveLog(activeSeed,log,hints.wrongFlags);
-        flagMapRef.current=replay.finalFlags;
+        const board=boardFromLog(boardRef.current.seed,log,hints.wrongFlags);
+        board.dirty=!!mpRoomId; // an undo can't be taken back off, so the next sync rebuilds from the server's log
+        boardRef.current=board;
+        flagMapRef.current={};
         v1FramesRef.current=null;
-        setCells(replay.cells);setMoves(replay.moves);setFlags(replay.flags);setGameOver(replay.gameOver);setFirstClick(replay.firstClick);
-        setClearedAtLastUndo(replay.clearedAtLastUndo);
-        setUndoUsedCount(replay.undoUsedCount);
-        firstClickRevealedRef.current=replay.firstClick!==null;
-        setShowGameOverModal(!!replay.gameOver);
+        bumpBoard(Infinity);
+        setShowGameOverModal(board.gameOver);
         setMpLoserTag(null);
         showStatus(mpSyncingRef.current?'Undo applied — syncing with room':'Free undo used');
-    },[undoAvailable,activeSeed,hints.wrongFlags,showStatus]);
+    },[undoAvailable,hints.wrongFlags,showStatus,mpRoomId,bumpBoard]);
 
     // Hovering a number highlights the cells a chord would open, or with the pulse hint, its hidden neighbours.
     const hoverHighlights=useMemo(()=>{
-        const none={chordTargets:new Set(),chordCell:null,pulseTargets:new Set()};
+        const none=NO_HIGHLIGHTS;
         if(!hoveredCell||gameOver)return none;
         const[hx,hy]=hoveredCell,key=`${hx},${hy}`,state=cells[key];
         if(!state||state[0]!=='r')return none;
@@ -857,64 +837,39 @@ function App(){
         if(flagged===count)return{...none,chordTargets:new Set(hidden),chordCell:key};
         if(hints.pulseNeighbors)return{...none,pulseTargets:new Set(hidden)};
         return none;
-    },[hoveredCell,cells,gameOver,hints.pulseNeighbors]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    },[hoveredCell,boardVersion,gameOver,hints.pulseNeighbors]); // boardVersion: cells changes in place
 
+    // The first reveal places the minefield (its 3×3 is always safe). In a room a click is journaled, so the next sync
+    // can take it back off and put it where the server's order says.
     const revealCell=useCallback((x,y)=>{
-        // The first click only places the minefield; the effect below reveals it.
-        if(firstClick===null){
-            moveLogRef.current.push(['r',x,y]);
-            if(mpSyncingRef.current)Net.sendMove(['r',x,y]);
-            setFirstClick([x,y]);return;
-        }
-        setCells(prev=>{
-            const{next,diff,movesDelta,gameOver:hitMine}=applyReveal(prev,x,y,minefield,hints.wrongFlags);
-            if(next===prev)return prev;
-            moveLogRef.current.push(['r',x,y]);
-            if(mpSyncingRef.current)Net.sendMove(['r',x,y]);
-            recordV1Frame(v1FramesRef,diff,flagMapRef.current);
-            if(movesDelta)setMoves(m=>m+movesDelta);
-            if(hitMine)setGameOver(true);
-            return next;
-        });
-    },[firstClick,minefield,hints.wrongFlags]);
+        const board=boardRef.current;
+        if(!mpRoomId)board.showWrongFlags=!!hints.wrongFlags; // the setting at the click; a room's comes from the server
+        const diff=applyMove(board,['r',x,y],!!mpRoomId);
+        if(!diff)return;
+        moveLogRef.current.push(['r',x,y]);
+        if(mpSyncingRef.current)Net.sendMove(['r',x,y]);
+        recordV1Frame(v1FramesRef,diff,flagMapRef.current);
+        bumpBoard(diff.length);
+    },[mpRoomId,hints.wrongFlags,bumpBoard]);
 
-    useEffect(()=>{
-        if(firstClick&&!firstClickRevealedRef.current){firstClickRevealedRef.current=true;
-            const[x,y]=firstClick;
-            setCells(prev=>{
-                const{next,diff,movesDelta}=applyReveal(prev,x,y,minefield,hints.wrongFlags);
-                if(next===prev)return prev;
-                recordV1Frame(v1FramesRef,diff,flagMapRef.current);
-                if(movesDelta)setMoves(m=>m+movesDelta);
-                return next;
-            });}
-    },[firstClick,minefield,hints.wrongFlags]);
-
+    // Cycles flag, question mark, hidden; or, with the chord-flag hint, flags all of a number's must-be-mine neighbours.
     const flagCell=useCallback((x,y)=>{
-        setCells(prev=>{
-            const state=prev[`${x},${y}`];
-            if(hints.chordFlag&&state&&state[0]==='r'){
-                const{next,diff,flagsDelta,changed}=applyChordFlag(prev,x,y);
-                if(changed){
-                    for(const[k]of diff){
-                        const[fx,fy]=k.split(',').map(Number);
-                        moveLogRef.current.push(['f',fx,fy]);
-                        if(mpSyncingRef.current)Net.sendMove(['f',fx,fy]);
-                    }
-                    applyDiffToFlags(flagMapRef.current,diff);
-                    if(flagsDelta)setFlags(f=>f+flagsDelta);
-                    return next;
-                }
-            }
-            const{next,diff,flagsDelta,changed}=applyFlag(prev,x,y);
-            if(!changed)return prev;
-            moveLogRef.current.push(['f',x,y]);
-            if(mpSyncingRef.current)Net.sendMove(['f',x,y]);
+        const board=boardRef.current;
+        if(!board.length&&!board.firstClick)return; // flags wait for the first reveal, which places the minefield
+        const targets=hints.chordFlag?chordFlagTargets(board.cells,x,y):[];
+        const entries=targets.length?targets.map(key=>['f',...key.split(',').map(Number)]):[['f',x,y]];
+        let changed=false;
+        for(const entry of entries){
+            const diff=applyMove(board,entry,!!mpRoomId);
+            if(!diff)continue;
+            changed=true;
+            moveLogRef.current.push(entry);
+            if(mpSyncingRef.current)Net.sendMove(entry);
             applyDiffToFlags(flagMapRef.current,diff);
-            if(flagsDelta)setFlags(f=>f+flagsDelta);
-            return next;
-        });
-    },[hints.chordFlag]);
+        }
+        if(changed)bumpBoard();
+    },[mpRoomId,hints.chordFlag,bumpBoard]);
 
     const hoverCell=useCallback((x,y)=>setHoveredCell([x,y]),[]);
     const clearHover=useCallback(()=>setHoveredCell(null),[]);
@@ -931,7 +886,10 @@ function App(){
             out.push(<Cell key={key} x={x} y={y} state={cells[key]||null} gameOver={gameOver}
                          chordTarget={hoverHighlights.chordTargets.has(key)} chordReady={hoverHighlights.chordCell===key} pulse={hoverHighlights.pulseTargets.has(key)} size={cellSize}
                          onReveal={revealCell} onFlag={flagCell} onHover={hoverCell} onLeave={clearHover}/>)}
-        return out},[leftX,topY,rows,cols,cells,gameOver,cellSize,revealCell,flagCell,hoverCell,clearHover,hoverHighlights]);
+        return out;
+    // cells changes in place; boardVersion stands for it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    },[leftX,topY,rows,cols,boardVersion,gameOver,cellSize,revealCell,flagCell,hoverCell,clearHover,hoverHighlights]);
 
     const isFullscreen=viewMode==='Fullscreen';
     // Export progress shows as a toast; a long timelapse's speed picker still needs the modal.
@@ -1097,10 +1055,9 @@ function App(){
                 <button className="hb" title="Settings" style={{position:'absolute',right:8,top:'50%',transform:'translateY(-50%)'}} onClick={()=>setShowSettings(true)}>⚙</button>
             </div>
             <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',width:'100%',overflow:'hidden'}}>
-                <div ref={containerRef} className="game-container" style={{...containerStyle,position:'relative'}} onContextMenu={e=>e.preventDefault()} onWheel={handleWheel} onMouseDown={handleBoardMouseDown}>
-                    <div style={{display:'grid',gridTemplateColumns:`repeat(${cols},${cellSize}px)`,gridTemplateRows:`repeat(${rows},${cellSize}px)`,width:gridW,height:gridH}}>
-                        {gridCells}
-                    </div>
+                <div ref={containerRef} className={'game-container'+(uiSettings.boardFx==='reduced'?' fx-reduced':uiSettings.boardFx==='off'?' fx-off':'')} style={{...containerStyle,position:'relative'}} onContextMenu={e=>e.preventDefault()} onWheel={handleWheel} onMouseDown={handleBoardMouseDown}>
+                    {window.BoardGrid?<BoardGrid cols={cols} rows={rows} cellSize={cellSize}>{gridCells}</BoardGrid>
+                        :<div style={{display:'grid',gridTemplateColumns:`repeat(${cols},${cellSize}px)`,gridTemplateRows:`repeat(${rows},${cellSize}px)`,width:gridW,height:gridH}}>{gridCells}</div>}
                     {mpRoomId&&window.PingOverlay&&uiSettings.pingQuality!=='off'&&<PingOverlay pings={mpPings} viewX={viewX} viewY={viewY} cellSize={cellSize} containerSize={containerSize} quality={uiSettings.pingQuality}/>}
                     {mpRoomId&&uiSettings.cursorSee!=='off'&&<CursorOverlay players={mpPlayers} selfId={mpPlayerId} viewX={viewX} viewY={viewY} cellSize={cellSize} containerSize={containerSize} glideMs={CURSOR_GLIDE_MS[uiSettings.cursorSee]??120}/>}
                 </div>
@@ -1109,4 +1066,11 @@ function App(){
         </div>);
 }
 
-ReactDOM.render(<App/>,document.getElementById('root'));
+// The service worker falls back to its cache file by file, so a slow load can pair this app.js with an older game.js.
+if(typeof window.createBoard==='function')ReactDOM.render(<App/>,document.getElementById('root'));
+else{
+    let reloaded=false;try{reloaded=sessionStorage.getItem('minesweeper_stale_reload')==='1';sessionStorage.setItem('minesweeper_stale_reload','1')}catch(e){}
+    if(!reloaded)location.reload();
+    else ReactDOM.render(<div style={{color:'#ccc',padding:24,textAlign:'center'}}>InfiniSweeper is updating. Refresh the page in a moment.</div>,document.getElementById('root'));
+}
+try{if(typeof window.createBoard==='function')sessionStorage.removeItem('minesweeper_stale_reload')}catch(e){}

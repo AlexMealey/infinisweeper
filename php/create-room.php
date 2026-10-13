@@ -6,6 +6,7 @@ require __DIR__ . '/lib.php';
 
 handle_preflight();
 require_post();
+ignore_user_abort(true); // a dropped connection mustn't stop it between writing the room's files
 
 $body = read_json_body();
 
@@ -31,16 +32,12 @@ $playerId = random_hex_id(8);
 delete_expired_rooms(); // cheap enough to run on every room creation, so no cron job is needed
 
 $state = new_room_state($seed, $hints, $playerId); // the creator is the room's founder
-if ($moveLog !== '') {
-    $state['moveLog']    = $moveLog;
-    $state['moveOwners'] = str_repeat(substr($playerId, 0, 8) . ';', substr_count($moveLog, ';'));
-}
-$file = fopen(room_path($roomId), 'x'); // 'x' fails if the file exists
-if (!$file) error_response('room id collision, please retry', 500);
-flock($file, LOCK_EX);
-fwrite($file, json_encode($state, JSON_UNESCAPED_SLASHES));
-fflush($file);
-flock($file, LOCK_UN);
-fclose($file);
+$lock = @fopen(room_file($roomId, 'lock'), 'x'); // 'x' fails if the file exists
+if (!$lock) error_response('room id collision, please retry', 500);
+flock($lock, LOCK_EX);
+$ok = write_log_files($roomId, $state, $moveLog, str_repeat(substr($playerId, 0, 8) . ';', substr_count($moveLog, ';')))
+    && save_room($roomId, $state);
+close_room($lock);
+if (!$ok) error_response('could not save the room', 500);
 
 json_response(['roomId' => $roomId, 'playerId' => $playerId]);

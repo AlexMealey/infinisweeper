@@ -168,7 +168,8 @@
             lastOthersViews = positions.views;
             lastOthersCursors = positions.cursors;
             lastEventSeq = newestEventSeq;
-            if (config.onSync) config.onSync(data);
+            // The server has our moves now; a failure handling its answer mustn't requeue them as unsent.
+            if (config.onSync) { try { config.onSync(data); } catch (err) { console.error('sync handler error', err); } }
         } catch (err) {
             // Requeue everything unsent, so a failed request loses nothing.
             queuedMoves = moves.concat(queuedMoves);

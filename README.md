@@ -16,12 +16,15 @@ Open `http://<server-ip>:8080`.
 
 ## Save files
 
-Multiplayer rooms are saved as one JSON file per room. They are volume-mapped to the host:
+Each multiplayer room is saved as a few files, named after the room's id. They are volume-mapped to the host:
 
 | Host | Container |
 |---|---|
 | `./data/rooms/` | `/var/www/html/data/rooms/` |
 
+- `<id>.state.json` holds the room's settings and players, `<id>.<n>.log` and `<id>.<n>.own` its moves and who made them, and `<id>.lock` keeps requests in turn. A `<id>.vote` file holds a save file while the room votes on loading it.
+- Rooms saved by older versions (a single `<id>.json`) are converted the first time they're opened. The old file is left as it was, so going back to an older version still finds the room as it was at that moment; it's deleted with the room.
+- Copying the folder while the server runs (for example `tar czf rooms.tgz data/rooms`) is safe: a room whose move files come out shorter than its state file is repaired to the moves both have.
 - They survive container restarts, rebuilds and `docker compose down`.
 - The container gives the folder to `www-data` (uid 33) on start, so the files are owned by uid 33 on the host. You can read them freely; deleting them needs `sudo`.
 - Rooms with no activity for 24 hours are deleted automatically (`ROOM_TTL_SEC` in `php/lib.php`).

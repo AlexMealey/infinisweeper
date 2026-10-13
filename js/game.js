@@ -32,6 +32,7 @@ window.encodeMoveLog=function(log){let s='';for(const[type,x,y]of log)s+=type+x+
 window.decodeMoveLog=function(str){const out=[];if(!str)return out;for(const p of str.split(';')){if(!p)continue;const comma=p.indexOf(',',1);if(comma<0)continue;out.push([p[0],+p.slice(1,comma),+p.slice(comma+1)])}return out};
 
 // Mines come from the seed. The first click's 3×3 is kept clear, and the mines it held move to nearby cells.
+const RELOCATE_MAX_RING=20; // how far from the first click a moved mine can land
 window.createMinefield=function(seedNum,firstClick){
     let relocated=null;
     function relocatedMines(){
@@ -50,7 +51,7 @@ window.createMinefield=function(seedNum,firstClick){
                         if(seededRandom(rx+salt*7,ry+salt*13,seedNum+salt+1)<0.35||ring>3){relocated.add(key);placed=true}
                     }
                 }
-                ring++;salt++;if(ring>20)break;
+                ring++;salt++;if(ring>RELOCATE_MAX_RING)break;
             }
             ring=2;salt++;
         }
@@ -58,8 +59,10 @@ window.createMinefield=function(seedNum,firstClick){
     }
     function isMine(x,y){
         if(firstClick){
-            if(Math.abs(x-firstClick[0])<=1&&Math.abs(y-firstClick[1])<=1)return false;
-            if(relocatedMines().has(`${x},${y}`))return true;
+            const dx=x-firstClick[0],dy=y-firstClick[1];
+            if(dx>=-1&&dx<=1&&dy>=-1&&dy<=1)return false;
+            // Only near the first click can a mine have moved, so most calls skip building the key.
+            if(dx>=-RELOCATE_MAX_RING&&dx<=RELOCATE_MAX_RING&&dy>=-RELOCATE_MAX_RING&&dy<=RELOCATE_MAX_RING&&relocatedMines().has(`${x},${y}`))return true;
         }
         return seededRandom(x,y,seedNum)<MINE_DENSITY;
     }
@@ -126,49 +129,139 @@ window.applyFlag=function(cells,x,y,mutate){
     if(nextState===undefined)delete next[key];else next[key]=nextState;
     return{next,diff:[[key,nextState]],flagsDelta:nextState==='flag'?1:nextState==='quest'?-1:0,changed:true};
 };
-// Flags all of a number's hidden neighbours when they must all be mines.
-window.applyChordFlag=function(cells,x,y,mutate){
-    const state=cells[`${x},${y}`],noChange={next:cells,diff:[],flagsDelta:0,changed:false};
-    if(!state||state[0]!=='r')return noChange;
+// A number's hidden neighbours when they must all be mines (its flags plus them make its count), otherwise none.
+window.chordFlagTargets=function(cells,x,y){
+    const state=cells[`${x},${y}`];
+    if(!state||state[0]!=='r')return[];
     const count=+state[1];
-    if(!count)return noChange;
+    if(!count)return[];
     let flagged=0;const hidden=[];
     for(const[dx,dy]of NEIGHBOR_OFFSETS){
         const key=`${x+dx},${y+dy}`,neighbor=cells[key];
         if(neighbor==='flag')flagged++;
         else if(!neighbor)hidden.push(key);
     }
-    if(flagged+hidden.length!==count||hidden.length===0)return noChange;
+    return flagged+hidden.length===count?hidden:[];
+};
+// Flags all of a number's hidden neighbours when they must all be mines.
+window.applyChordFlag=function(cells,x,y,mutate){
+    const hidden=chordFlagTargets(cells,x,y);
+    if(!hidden.length)return{next:cells,diff:[],flagsDelta:0,changed:false};
     const next=mutate?cells:{...cells},diff=[];
     for(const key of hidden){next[key]='flag';diff.push([key,'flag'])}
     return{next,diff,flagsDelta:hidden.length,changed:true};
 };
-// Rebuilds a board from its move log. losingMoveIndex is the reveal that hit a mine (-1 if none), which an undo
-// rewrites; in a room, other players' clicks can be logged after it.
-window.replayMoveLog=function(seed,moveLog,showWrongFlags){
-    const out={cells:{},moves:0,flags:0,gameOver:false,losingMoveIndex:-1,firstClick:null,clearedAtLastUndo:null,undoUsedCount:0,finalFlags:{}};
-    if(!moveLog||!moveLog.length)return out;
-    const first=moveLog[0];
-    out.firstClick=first&&first[0]==='r'?[first[1],first[2]]:null;
-    const minefield=createMinefield(hashSeed(seed),out.firstClick);
-    const cells={},flags={};let cleared=0;
-    for(let i=0;i<moveLog.length&&!out.gameOver;i++){
-        const entry=moveLog[i];
-        if(!entry||entry.length<3)continue;
-        const[type,x,y]=entry;
-        if(type==='r'){
-            const{diff,movesDelta,gameOver}=applyReveal(cells,x,y,minefield,showWrongFlags,true);
-            if(!diff.length)continue;
-            applyDiffToFlags(flags,diff);
-            for(const[,state]of diff)if(state&&state[0]==='r')cleared++;
-            out.moves+=movesDelta;
-            if(gameOver){out.gameOver=true;out.losingMoveIndex=i}
-        }else if(type==='f'){
-            const{diff,flagsDelta,changed}=applyFlag(cells,x,y,true);
-            if(changed){applyDiffToFlags(flags,diff);out.flags+=flagsDelta}
-        }else if(type==='u'){out.clearedAtLastUndo=cleared;out.undoUsedCount++}
+
+// A board built from its move log one entry at a time, in place, so a new move costs only what it changes.
+// losingMoveIndex is the reveal that hit a mine (-1 if none), which an undo rewrites; in a room, other players'
+// clicks can be logged after it. preset: a version 1 save's {cells, firstClick, moves, flags, gameOver}, which has no log.
+const BOARD_FIELDS=['moves','flags','cleared','gameOver','losingMoveIndex','firstClick','minefield','clearedAtLastUndo','undoUsedCount','length'];
+window.createBoard=function(seed,showWrongFlags,preset){
+    const p=preset||{},seedNum=hashSeed(seed),firstClick=p.firstClick||null;
+    const board={seed,seedNum,showWrongFlags:!!showWrongFlags,cells:p.cells||{},moves:p.moves||0,flags:p.flags||0,cleared:0,gameOver:!!p.gameOver,
+        losingMoveIndex:-1,firstClick,minefield:createMinefield(seedNum,firstClick),clearedAtLastUndo:null,undoUsedCount:0,length:0,journal:null,dirty:false};
+    for(const key in board.cells){const s=board.cells[key];if(s&&s[0]==='r')board.cleared++}
+    return board;
+};
+// Plays the next log entry as a replay does: entry 0 places the minefield if it's a reveal, and nothing after a game
+// over counts. Returns the diff, or null if nothing changed. journal starts journaling: every entry from then on is
+// kept until rollbackBoard takes them all back off.
+window.applyLogEntry=function(board,entry,journal){
+    if(journal&&!board.journal){const before={};for(const k of BOARD_FIELDS)before[k]=board[k];board.journal={before,diffs:[]}}
+    const index=board.length++;
+    if(board.gameOver)return null;
+    if(index===0&&!board.firstClick&&entry&&entry[0]==='r'){board.firstClick=[entry[1],entry[2]];board.minefield=createMinefield(board.seedNum,board.firstClick)}
+    if(!entry||entry.length<3)return null;
+    const[type,x,y]=entry;
+    let diff=null;
+    if(type==='r'){
+        const r=applyReveal(board.cells,x,y,board.minefield,board.showWrongFlags,true);
+        if(!r.diff.length)return null;
+        diff=r.diff;
+        for(const[,state]of diff)if(state&&state[0]==='r')board.cleared++;
+        board.moves+=r.movesDelta;
+        if(r.gameOver){board.gameOver=true;board.losingMoveIndex=index}
+    }else if(type==='f'){
+        const r=applyFlag(board.cells,x,y,true);
+        if(!r.changed)return null;
+        diff=r.diff;
+        board.flags+=r.flagsDelta;
+    }else{
+        if(type==='u'){board.clearedAtLastUndo=board.cleared;board.undoUsedCount++}
+        return null;
     }
-    out.cells=cells;out.finalFlags=flags;return out;
+    if(board.journal)board.journal.diffs.push(diff);
+    return diff;
+};
+// What a change replaced. The rules only make these changes: hidden to a number, 'exp', 'mine' or 'flag'; 'flag' to
+// 'quest', 'flag-ok' or 'flag-bad'; 'quest' to hidden. A new kind of change needs a case here.
+const stateBefore=state=>state==='quest'||state==='flag-ok'||state==='flag-bad'?'flag':state===undefined?'quest':undefined;
+window.rollbackBoard=function(board){
+    const journal=board.journal;
+    if(!journal)return;
+    for(let i=journal.diffs.length-1;i>=0;i--)for(const[key,state]of journal.diffs[i]){
+        const before=stateBefore(state);
+        if(before===undefined)delete board.cells[key];else board.cells[key]=before;
+    }
+    Object.assign(board,journal.before);
+    board.journal=null;
+};
+// A click is kept only if it changed the board; one that does nothing isn't logged or sent.
+window.applyMove=function(board,entry,journal){
+    const diff=applyLogEntry(board,entry,journal);
+    if(!diff)board.length--;
+    return diff;
+};
+window.boardFromLog=function(seed,moveLog,showWrongFlags){
+    const board=createBoard(seed,showWrongFlags);
+    for(const entry of moveLog||[])applyLogEntry(board,entry);
+    return board;
+};
+// The whole-log replay as an object, for a cached app.js from before the board API.
+window.replayMoveLog=function(seed,moveLog,showWrongFlags){
+    const b=boardFromLog(seed,moveLog,showWrongFlags);
+    return{cells:b.cells,moves:b.moves,flags:b.flags,gameOver:b.gameOver,losingMoveIndex:b.losingMoveIndex,firstClick:b.firstClick,
+        clearedAtLastUndo:b.clearedAtLastUndo,undoUsedCount:b.undoUsedCount,finalFlags:extractFlags(b.cells)};
+};
+// Lays our moves the server hasn't had yet over its log, as the server will: an undo rewrites the latest reveal of
+// its cell (unless that's already undone), anything else goes on the end. Changes log in place.
+window.mergePendingMoves=function(log,pending){
+    for(const m of pending){
+        if(m[0]!=='u'){log.push([m[0],m[1],m[2]]);continue}
+        for(let i=log.length-1;i>=0;i--){
+            const entry=log[i];
+            if((entry[0]==='r'||entry[0]==='u')&&entry[1]===m[1]&&entry[2]===m[2]){if(entry[0]==='r')log[i]=['u',m[1],m[2]];break}
+        }
+    }
+    return log;
+};
+// A room's board after a sync: the server's log with our moves it hasn't had yet (pending) on top, as replaying both
+// would give. added: the server's entries since the last sync. It rebuilds only when it must (the server sent its
+// whole log, the seed or wrong-flag setting changed, or an undo is involved); otherwise our moves come back off, the
+// server's go on (ours among them, in its order) and the ones it hasn't had go back on top. log is the move log the
+// board was built from, kept the same length as the board. Returns {board, log}, or null if nothing changed.
+window.syncBoard=function(board,log,serverLog,added,fullLog,seed,showWrongFlags,pending){
+    const rebuild=fullLog||board.dirty||board.seed!==seed||board.showWrongFlags!==!!showWrongFlags;
+    if(!rebuild&&!added.length)return null;
+    const undoPending=pending.some(m=>m[0]==='u');
+    if(rebuild||undoPending){
+        log=serverLog.slice();board=createBoard(seed,showWrongFlags);
+        if(undoPending){
+            // An undo rewrites an earlier entry, so the next sync rebuilds again rather than taking it back off.
+            mergePendingMoves(log,pending);
+            for(const entry of log)applyLogEntry(board,entry);
+            board.dirty=true;
+        }else{
+            for(const entry of log)applyLogEntry(board,entry);
+            for(const m of pending){const entry=[m[0],m[1],m[2]];log.push(entry);applyLogEntry(board,entry,true)}
+        }
+        return{board,log};
+    }
+    rollbackBoard(board);
+    log.length=board.length;
+    for(const entry of added){applyLogEntry(board,entry);log.push(entry)}
+    for(const m of pending){const entry=[m[0],m[1],m[2]];applyLogEntry(board,entry,true);log.push(entry)}
+    return{board,log};
 };
 // Draws a cell as the board shows it, for image and video exports.
 window.drawCellToCanvas=function(ctx,state,x,y,size){
