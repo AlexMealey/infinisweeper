@@ -12,6 +12,8 @@ $body = read_json_body();
 $roomId          = $body['roomId']   ?? '';
 $playerId        = $body['playerId'] ?? '';
 $name            = isset($body['name']) ? sanitize_name((string)$body['name']) : 'Player';
+$color           = (isset($body['color']) && is_string($body['color']) && preg_match('/^#[0-9a-fA-F]{6}$/', $body['color']))
+                   ? strtolower($body['color']) : null; // the player's pick; null takes one from the name
 $cursor          = $body['cursor'] ?? null;
 $view            = $body['view']   ?? null;
 $ping            = (isset($body['ping']) && is_array($body['ping'])) ? $body['ping'] : null;
@@ -43,7 +45,7 @@ if (!take_rate_token($player)) {
 }
 
 $player['name']     = $name;
-$player['color']    = color_from_name($name);
+$player['color']    = $color ?? color_from_name($name);
 $player['lastSeen'] = time();
 // {hidden: true}: the mouse left the board or the player stopped sharing it.
 if (is_array($cursor) && !empty($cursor['hidden'])) {

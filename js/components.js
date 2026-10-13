@@ -69,6 +69,25 @@ window.HintOptions=function HintOptions({hints,setHints}){
     </>);
 };
 
+// "My colour" swatches. '' is Auto: the server picks one from the player's name.
+const PLAYER_COLORS=['#5b9bd5','#6bab42','#ef4444','#a855f7','#06b6d4','#f59e0b','#ec4899','#10b981','#f97316','#6366f1','#facc15','#e5e7eb'];
+const ColorChoice=({value,onChange})=>{
+    const custom=!!value&&!PLAYER_COLORS.includes(value);
+    const ring=on=>on?'0 0 0 2px #1a1a32,0 0 0 4px #fff':'none';
+    return(
+        <div style={{display:'flex',alignItems:'center',gap:8,padding:'2px 0'}}>
+            <span style={{color:'#aaa',fontSize:12,minWidth:82}}>My colour</span>
+            <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                <button title="Auto: picked from your name" onClick={()=>onChange('')} style={{padding:'1px 7px',fontSize:11,borderRadius:9,boxShadow:ring(!value)}}>Auto</button>
+                {PLAYER_COLORS.map(c=><button key={c} title={c} aria-label={`Colour ${c}`} onClick={()=>onChange(c)} style={{width:18,height:18,padding:0,borderRadius:'50%',border:0,background:c,boxShadow:ring(value===c)}}/>)}
+                <label title="Custom colour" style={{width:18,height:18,borderRadius:'50%',overflow:'hidden',cursor:'pointer',position:'relative',boxShadow:ring(custom),background:custom?value:'conic-gradient(#ef4444,#facc15,#10b981,#06b6d4,#6366f1,#ec4899,#ef4444)'}}>
+                    <input type="color" aria-label="Custom colour" value={value||'#5b9bd5'} onChange={e=>onChange(e.target.value)} style={{position:'absolute',inset:0,opacity:0,cursor:'pointer'}}/>
+                </label>
+            </div>
+        </div>
+    );
+};
+
 window.SettingsModal=function SettingsModal({hints,setHints,uiSettings,setUiSettings,viewMode,changeView,cellSize,setCellSize,onClose}){
     useEscapeKey(onClose);
     const SectionHeading=({children})=>(
@@ -113,8 +132,26 @@ window.SettingsModal=function SettingsModal({hints,setHints,uiSettings,setUiSett
                 </SubOptions>}
 
                 <SectionHeading>Multiplayer</SectionHeading>
-                <Checkbox label="Show other players' cursors" checked={!!uiSettings.showCursors} onChange={e=>setUiSettings(u=>({...u,showCursors:e.target.checked}))}/>
-                <Checkbox label="Share my cursor" checked={uiSettings.shareCursor!==false} onChange={e=>setUiSettings(u=>({...u,shareCursor:e.target.checked}))}/>
+                <ColorChoice value={uiSettings.myColor||''} onChange={c=>setUiSettings(u=>({...u,myColor:c}))}/>
+                <div style={{display:'flex',alignItems:'center',gap:8,padding:'2px 0'}}>
+                    <span style={{color:'#aaa',fontSize:12,minWidth:82}}>Others' cursors</span>
+                    <select className="hs" value={uiSettings.cursorSee||'off'} onChange={e=>setUiSettings(u=>({...u,cursorSee:e.target.value}))}>
+                        <option value="off">Off</option><option value="infrequent">Infrequent (1×/s)</option><option value="normal">Normal (4×/s)</option><option value="frequent">Frequent (10×/s)</option>
+                    </select>
+                </div>
+                <div style={{display:'flex',alignItems:'center',gap:8,padding:'2px 0'}}>
+                    <span style={{color:'#aaa',fontSize:12,minWidth:82}}>My cursor</span>
+                    <select className="hs" value={uiSettings.cursorSend||'normal'} onChange={e=>setUiSettings(u=>({...u,cursorSend:e.target.value}))}>
+                        <option value="off">Off</option><option value="infrequent">Infrequent (1×/s)</option><option value="normal">Normal (4×/s)</option><option value="frequent">Frequent (10×/s)</option>
+                    </select>
+                </div>
+                <div style={{display:'flex',alignItems:'center',gap:8,padding:'2px 0'}}>
+                    <span style={{color:'#aaa',fontSize:12,minWidth:82}}>Pings</span>
+                    <select className="hs" value={uiSettings.pingQuality||'full'} onChange={e=>setUiSettings(u=>({...u,pingQuality:e.target.value}))}>
+                        <option value="off">Off</option><option value="low">Low (still blob)</option><option value="light">Light animation</option><option value="full">Full animation</option>
+                    </select>
+                </div>
+                <div style={{color:'#777',fontSize:11,paddingLeft:90}}>Lower settings send fewer requests and redraw less, for slower devices and connections. Middle-click a cell to ping it.</div>
 
                 <SectionHeading>Hints</SectionHeading>
                 <HintOptions hints={hints} setHints={setHints}/>
@@ -477,8 +514,15 @@ function boardOrigin(size,cellSize,viewX,viewY){
     return{padX:(size.w-cols*cellSize)/2,padY:(size.h-rows*cellSize)/2,leftX:viewX-Math.floor(cols/2),topY:viewY-Math.floor(rows/2)};
 }
 
-// Other players' cursors, positioned with the same world-to-screen maths as the grid.
-window.CursorOverlay=function CursorOverlay({players,selfId,viewX,viewY,cellSize,containerSize}){
+// Black or white, whichever reads better on a '#rrggbb' background (players can pick light colours).
+function textOn(color){
+    const n=/^#[0-9a-f]{6}$/i.test(color||'')?parseInt(color.slice(1),16):0x5b9bd5;
+    return((n>>16)*299+(n>>8&255)*587+(n&255)*114)/1000>165?'#111':'#fff';
+}
+
+// Other players' cursors, positioned with the same world-to-screen maths as the grid. glideMs: how long each
+// move animates, matched to how often they arrive (0 jumps).
+window.CursorOverlay=function CursorOverlay({players,selfId,viewX,viewY,cellSize,containerSize,glideMs=120}){
     if(!containerSize||!players)return null;
     const{padX,padY,leftX,topY}=boardOrigin(containerSize,cellSize,viewX,viewY);
     const cursors=[];
@@ -493,11 +537,11 @@ window.CursorOverlay=function CursorOverlay({players,selfId,viewX,viewY,cellSize
     return(
         <div style={{position:'absolute',left:0,top:0,width:'100%',height:'100%',pointerEvents:'none',zIndex:50,overflow:'hidden'}}>
             {cursors.map(({pid,p,cx,cy})=>(
-                <div key={pid} style={{position:'absolute',left:cx,top:cy,transform:'translate(-2px,-2px)',transition:'left .12s linear,top .12s linear'}}>
+                <div key={pid} style={{position:'absolute',left:cx,top:cy,transform:'translate(-2px,-2px)',transition:glideMs?`left ${glideMs}ms linear,top ${glideMs}ms linear`:'none'}}>
                     <svg width="18" height="20" viewBox="0 0 18 20" style={{filter:'drop-shadow(0 1px 2px rgba(0,0,0,.6))'}}>
                         <path d="M2 2 L2 16 L6 12 L9 18 L11 17 L8 12 L14 12 Z" fill={p.color||'#fff'} stroke="#000" strokeWidth="1"/>
                     </svg>
-                    <div style={{position:'absolute',left:16,top:14,background:p.color||'#5b9bd5',color:'#fff',fontSize:11,fontWeight:600,padding:'2px 6px',borderRadius:4,whiteSpace:'nowrap',boxShadow:'0 1px 3px rgba(0,0,0,.4)'}}>{p.name||'Player'}</div>
+                    <div style={{position:'absolute',left:16,top:14,background:p.color||'#5b9bd5',color:textOn(p.color),fontSize:11,fontWeight:600,padding:'2px 6px',borderRadius:4,whiteSpace:'nowrap',boxShadow:'0 1px 3px rgba(0,0,0,.4)'}}>{p.name||'Player'}</div>
                 </div>
             ))}
         </div>
@@ -505,18 +549,22 @@ window.CursorOverlay=function CursorOverlay({players,selfId,viewX,viewY,cellSize
 };
 
 // Middle-click pings: rings on the pinged cell, or an arrow on the board's edge pointing at an off-screen one.
+// quality: 'full' (two glowing rings), 'light' (one plain ring) or 'low' (a still blob).
 const PING_EDGE_INSET=18;
-window.PingOverlay=function PingOverlay({pings,viewX,viewY,cellSize,containerSize}){
+window.PingOverlay=function PingOverlay({pings,viewX,viewY,cellSize,containerSize,quality}){
     if(!containerSize||!pings||!pings.length)return null;
+    const q=quality==='low'||quality==='light'?quality:'full';
     const{padX,padY,leftX,topY}=boardOrigin(containerSize,cellSize,viewX,viewY);
     const w=containerSize.w,h=containerSize.h;
     return(
-        <div style={{position:'absolute',left:0,top:0,width:'100%',height:'100%',pointerEvents:'none',zIndex:49,overflow:'hidden'}}>
+        <div className={`pings-${q}`} style={{position:'absolute',left:0,top:0,width:'100%',height:'100%',pointerEvents:'none',zIndex:49,overflow:'hidden'}}>
             {pings.map(p=>{
                 const cx=padX+(p.x-leftX+0.5)*cellSize,cy=padY+(p.y-topY+0.5)*cellSize;
                 if(cx>=0&&cy>=0&&cx<=w&&cy<=h)return(
                     <div key={p.id} className="ping" style={{left:cx,top:cy,'--c':p.color,'--s':cellSize*2.2+'px'}}>
-                        <div className="ping-ring"/><div className="ping-ring" style={{animationDelay:'.5s'}}/><div className="ping-dot"/>
+                        {q==='low'?<div className="ping-blob"/>:<div className="ping-ring"/>}
+                        {q==='full'&&<div className="ping-ring" style={{animationDelay:'.5s'}}/>}
+                        <div className="ping-dot"/>
                     </div>
                 );
                 // Off screen: walk from the centre toward the ping until it meets the inset edge.
@@ -526,7 +574,7 @@ window.PingOverlay=function PingOverlay({pings,viewX,viewY,cellSize,containerSiz
                 // The name sits on the board's side of the arrow, so the edge never clips it.
                 const labelPos={[dx<0?'left':'right']:14,[dy<0?'top':'bottom']:2};
                 return(
-                    <div key={p.id} className="ping-edge" style={{left:w/2+dx*scale,top:h/2+dy*scale,'--c':p.color}}>
+                    <div key={p.id} className="ping-edge" style={{left:w/2+dx*scale,top:h/2+dy*scale,'--c':p.color,'--t':textOn(p.color)}}>
                         <div className="ping-edge-arrow" style={{transform:`translate(-50%,-50%) rotate(${angle}deg)`}}/>
                         <div className="ping-edge-label" style={labelPos}>{p.name}</div>
                     </div>

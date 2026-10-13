@@ -5,7 +5,9 @@
     const POLL_IDLE_MS = 500;    // once the room has been quiet for IDLE_AFTER_MS
     const IDLE_AFTER_MS = 5000;
     const MIN_SEND_GAP_MS = 100; // clicks closer than this share a request (keeps under the server's rate limit)
-    const CURSOR_MIN_INTERVAL_MS = 100;
+    // Cursor rates, set from the settings: how often ours goes out, and how fast we poll while others' move.
+    // 'off' isn't listed: we send none, or others' moving cursors don't speed up the poll.
+    const CURSOR_RATE_MS = {infrequent: 1000, normal: 250, frequent: 100};
     const BACKOFF_STEPS_MS = [500, 1500, 4000, 10000];
 
     let config = null;           // {roomId, playerId, name, onSync, onError, onStatus, onBackoff, endpoint}
@@ -24,7 +26,11 @@
     let pendingPing = null;
     let viewCenter = null;       // sent with every request once set
     let lastActivityAt = 0;      // last local input or remote change; picks the poll rate
-    let lastOthersPositions = '';
+    let lastOthersViews = '';
+    let lastOthersCursors = '';
+    let othersCursorsMovedAt = 0;
+    let cursorSendRate = 'normal';
+    let cursorSeeRate = 'normal';
     let lastEventSeq = 0;        // newest room event seen; a newer one (e.g. a ping) counts as activity
     let nextSyncAt = 0;
     let lastSentAt = 0;
@@ -53,6 +59,31 @@
 
     function msUntilSendAllowed(){ return Math.max(0, lastSentAt + MIN_SEND_GAP_MS - Date.now()); }
 
+    // How long until our pending cursor may go out at the chosen rate; a hide goes at once.
+    function cursorDueIn(){
+        if (!pendingCursor) return Infinity;
+        if (pendingCursor.hidden || !CURSOR_RATE_MS[cursorSendRate]) return 0;
+        return Math.max(0, lastCursorSentAt + CURSOR_RATE_MS[cursorSendRate] - Date.now());
+    }
+
+    function pollDelay(){
+        let delay = isIdle() ? POLL_IDLE_MS : POLL_ACTIVE_MS;
+        // While others' cursors move, Normal and Frequent poll at that rate; Off and Infrequent don't speed up.
+        if ((cursorSeeRate === 'normal' || cursorSeeRate === 'frequent') && Date.now() - othersCursorsMovedAt < IDLE_AFTER_MS) {
+            delay = Math.min(delay, CURSOR_RATE_MS[cursorSeeRate]);
+        }
+        return Math.max(Math.min(delay, cursorDueIn()), msUntilSendAllowed());
+    }
+
+    // Brings the next sync forward when our cursor is due before it.
+    function sendCursorWhenDue(){
+        if (!running || !timer || requestInFlight || failedSyncs > 0) return;
+        const wait = Math.max(cursorDueIn(), msUntilSendAllowed());
+        if (wait === Infinity || nextSyncAt - Date.now() <= wait) return;
+        clearTimeout(timer);
+        scheduleSync(wait);
+    }
+
     // Sends queued clicks now rather than at the next poll. Calls from one event (a chord flag queues several
     // moves) share a request. Error backoff is left alone.
     function sendSoon(){
@@ -65,13 +96,14 @@
     }
 
     function otherPlayersPositions(players){
-        let s = '';
+        let views = '', cursors = '';
         for (const pid in players || {}) {
             if (pid === config.playerId) continue;
             const p = players[pid] || {};
-            s += pid + ':' + (p.cursor ? p.cursor.x + ',' + p.cursor.y : '') + '|' + (p.view ? p.view.x + ',' + p.view.y : '') + ';';
+            views += pid + ':' + (p.view ? p.view.x + ',' + p.view.y : '') + ';';
+            cursors += pid + ':' + (p.cursor ? p.cursor.x + ',' + p.cursor.y : '') + ';';
         }
-        return s;
+        return {views, cursors};
     }
 
     async function sync(){
@@ -82,9 +114,9 @@
         // Take what's queued now; anything arriving mid-request goes in the next one.
         const moves = queuedMoves;
         queuedMoves = [];
-        // Leave the cursor out if one went very recently and nothing else is going.
-        const cursor = (moves.length > 0 || Date.now() - lastCursorSentAt >= CURSOR_MIN_INTERVAL_MS) ? pendingCursor : null;
-        if (cursor) lastCursorSentAt = Date.now();
+        // The cursor goes once, when the rate allows or with a click. The server keeps it until it changes.
+        const cursor = (moves.length > 0 || cursorDueIn() === 0) ? pendingCursor : null;
+        if (cursor) { lastCursorSentAt = Date.now(); pendingCursor = null; }
         const hints = pendingHints;
         pendingHints = null;
         const reset = pendingReset;
@@ -102,6 +134,7 @@
                     roomId: config.roomId,
                     playerId: config.playerId,
                     name: config.name,
+                    color: config.color || null, // null: the server picks one from the name
                     sinceVersion,
                     moveIndex,
                     logRevision,
@@ -125,17 +158,21 @@
             if (typeof data.moveIndex === 'number') moveIndex = data.moveIndex;
             if (typeof data.logRevision === 'number') logRevision = data.logRevision;
             if (typeof data.round === 'number') round = data.round;
-            // Others' activity keeps the active rate too, so watching someone play stays smooth.
+            // Others' activity keeps the active rate too, so watching someone play stays smooth. Their cursors
+            // set the rate on their own (pollDelay).
             const positions = otherPlayersPositions(data.players);
             const newestEventSeq = Array.isArray(data.events) ? data.events.reduce((m, e) => Math.max(m, e.seq || 0), lastEventSeq) : lastEventSeq;
-            if (positions !== lastOthersPositions || (data.newMoves && data.newMoves.length) || typeof data.moveLog === 'string'
+            if (positions.views !== lastOthersViews || (data.newMoves && data.newMoves.length) || typeof data.moveLog === 'string'
                     || (data.resetVote && data.resetVote.status === 'open') || newestEventSeq > lastEventSeq) markActive();
-            lastOthersPositions = positions;
+            if (positions.cursors !== lastOthersCursors) othersCursorsMovedAt = Date.now();
+            lastOthersViews = positions.views;
+            lastOthersCursors = positions.cursors;
             lastEventSeq = newestEventSeq;
             if (config.onSync) config.onSync(data);
         } catch (err) {
             // Requeue everything unsent, so a failed request loses nothing.
             queuedMoves = moves.concat(queuedMoves);
+            if (cursor && !pendingCursor) pendingCursor = cursor;
             if (hints && !pendingHints) pendingHints = hints;
             if (reset && !pendingReset) pendingReset = reset;
             if (vote && !pendingVote) pendingVote = vote;
@@ -150,7 +187,7 @@
                 const delay = failedSyncs > 0
                     ? BACKOFF_STEPS_MS[Math.min(failedSyncs - 1, BACKOFF_STEPS_MS.length - 1)]
                     : resendWhenDone ? msUntilSendAllowed()
-                    : (isIdle() ? POLL_IDLE_MS : POLL_ACTIVE_MS);
+                    : pollDelay();
                 if (failedSyncs > 0 && config.onBackoff) config.onBackoff({retryInMs: delay, errStreak: failedSyncs});
                 scheduleSync(delay);
             }
@@ -174,7 +211,9 @@
             pendingPing = null;
             viewCenter = null;
             lastActivityAt = Date.now(); // at the active rate while the room loads in
-            lastOthersPositions = '';
+            lastOthersViews = '';
+            lastOthersCursors = '';
+            othersCursorsMovedAt = 0;
             lastEventSeq = 0;
             resendWhenDone = false;
             failedSyncs = 0;
@@ -200,15 +239,23 @@
             return queuedMoves.map(m => [m[0], m[1], m[2], owner]);
         },
         sendCursor(x, y, cellSize){
-            if (!running) return;
+            if (!running || cursorSendRate === 'off') return;
             pendingCursor = {x, y, cellSize};
-            markActive();
+            if (cursorSendRate !== 'infrequent') markActive(); // Infrequent rides the polls already going
+            sendCursorWhenDue();
         },
         // The mouse left the board, or we stopped sharing it: the server clears our cursor for everyone.
         hideCursor(){
             if (!running) return;
             pendingCursor = {hidden: true};
-            markActive();
+            sendCursorWhenDue();
+        },
+        // send: how often our cursor goes out; see: how fast we poll while others' cursors move.
+        // Each is 'off', 'infrequent', 'normal' or 'frequent'. Kept across rooms.
+        setCursorRates(send, see){
+            const valid = r => r === 'off' || CURSOR_RATE_MS.hasOwnProperty(r);
+            if (valid(send)) cursorSendRate = send;
+            if (valid(see)) cursorSeeRate = see;
         },
         // A middle-click ping on cell (x, y); the others see it as a 'ping' event.
         sendPing(x, y){
@@ -246,6 +293,10 @@
         },
         updateName(name){
             if (config) config.name = name;
+        },
+        // '#rrggbb', or '' for the server's pick from the name.
+        updateColor(color){
+            if (config) config.color = color;
         },
         isRunning(){ return running; },
         flushNow(){ if (running && !requestInFlight) { if (timer) clearTimeout(timer); sync(); } },

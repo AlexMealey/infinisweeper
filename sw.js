@@ -1,4 +1,4 @@
-const CACHE_NAME = 'infinisweeper-v26';
+const CACHE_NAME = 'infinisweeper-v27';
 
 // After this long, a slow network loses to the cached copy. The fetch still finishes and refreshes the cache.
 const NETWORK_TIMEOUT_MS = 4000;

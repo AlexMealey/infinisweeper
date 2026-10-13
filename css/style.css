@@ -72,8 +72,14 @@ body{background:#080816;min-height:100vh;display:flex;flex-direction:column;alig
 @keyframes ping-ring{from{transform:scale(.2);opacity:1}to{transform:scale(1);opacity:0}}
 @keyframes ping-dot{0%{transform:scale(0)}8%{transform:scale(1.3)}15%,85%{transform:scale(1);opacity:1}100%{transform:scale(.6);opacity:0}}
 .ping-edge-arrow{position:absolute;left:0;top:0;width:0;height:0;border-top:9px solid transparent;border-bottom:9px solid transparent;border-left:16px solid var(--c);filter:drop-shadow(0 0 3px rgba(0,0,0,.9));animation:ping-edge 1s ease-in-out infinite}
-.ping-edge-label{position:absolute;background:var(--c);color:#fff;font-size:11px;font-weight:600;padding:2px 6px;border-radius:4px;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.4)}
+.ping-edge-label{position:absolute;background:var(--c);color:var(--t,#fff);font-size:11px;font-weight:600;padding:2px 6px;border-radius:4px;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.4)}
 @keyframes ping-edge{50%{opacity:.45}}
+/* Ping quality (Settings): Light keeps one ring and drops the glows and the arrow's shadow; Low is a still blob. */
+.ping-blob{position:absolute;left:calc(var(--s) / -3);top:calc(var(--s) / -3);width:calc(var(--s) / 1.5);height:calc(var(--s) / 1.5);border-radius:50%;background:var(--c);opacity:.45}
+.pings-light .ping-ring{box-shadow:none}
+.pings-light .ping-dot,.pings-low .ping-dot{box-shadow:0 0 0 2px rgba(0,0,0,.5)}
+.pings-light .ping-edge-arrow,.pings-low .ping-edge-arrow{filter:none}
+.pings-low .ping-dot,.pings-low .ping-edge-arrow{animation:none}
 .start-panel{width:400px;min-width:0;max-height:90vh;overflow-y:auto;position:relative}
 .start-panel .start-x{position:absolute;top:8px;right:10px;background:transparent;border:0;color:#666;font-size:22px;line-height:1;padding:2px 6px}
 .start-panel button.start-x:hover:not(:disabled){background:transparent;border:0;color:#aaa}

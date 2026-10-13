@@ -1,10 +1,12 @@
 // app.js – App component and ReactDOM render (JSX, compiled by Babel in the browser)
 const{useState,useCallback,useMemo,useEffect,useRef}=React;
 
-const DEFAULT_UI_SETTINGS={showArrows:true,showScores:true,showLeaderboard:true,showUndo:true,showZoom:true,showCoords:true,showSeed:true,showSeedBox:true,showLockBtn:true,defaultCellSize:CELL_SIZE_DEFAULT,exportRes:'auto',tlMovesPerFrame:1,tlFps:60,tlRes:'auto',showCursors:false,shareCursor:true};
+const DEFAULT_UI_SETTINGS={showArrows:true,showScores:true,showLeaderboard:true,showUndo:true,showZoom:true,showCoords:true,showSeed:true,showSeedBox:true,showLockBtn:true,defaultCellSize:CELL_SIZE_DEFAULT,exportRes:'auto',tlMovesPerFrame:1,tlFps:60,tlRes:'auto',myColor:'',cursorSee:'off',cursorSend:'normal',pingQuality:'full'};
 const CLEARED_PER_UNDO=1000;
 const MAX_VIDEO_BYTES=50e6; // timelapse.js has the same limit
 const PING_SHOW_MS=4000,MAX_PINGS_SHOWN=10,PING_COOLDOWN_MS=400; // middle-click pings in a room
+// Others' cursors by rate setting: how long each move glides, and how often Infrequent redraws them.
+const CURSOR_GLIDE_MS={infrequent:0,normal:120,frequent:100},CURSOR_INFREQUENT_MS=1000;
 
 // The world position (in fractional cells) under a screen point, for a view centred on viewX, viewY.
 function screenToWorld(rect,clientX,clientY,cellSize,viewX,viewY){
@@ -46,7 +48,15 @@ function App(){
     const[containerSize,setContainerSize]=useState({w:800,h:600});
     const[firstClick,setFirstClick]=useState(null);
     const[hints,setHints]=useState(()=>{try{const s=localStorage.getItem('minesweeper_hints');if(s)return migrateHints(JSON.parse(s))}catch(e){console.error('Failed to read saved hints',e)}return migrateHints(null)});
-    const[uiSettings,setUiSettings]=useState(()=>{try{const s=localStorage.getItem('minesweeper_ui');if(s)return{...DEFAULT_UI_SETTINGS,...JSON.parse(s)}}catch(e){console.error('Failed to read saved UI settings',e)}return DEFAULT_UI_SETTINGS});
+    const[uiSettings,setUiSettings]=useState(()=>{try{const s=localStorage.getItem('minesweeper_ui');if(s){
+        const saved=JSON.parse(s);
+        // Older builds had on/off switches where the cursor rate dropdowns are now.
+        if(saved.cursorSee===undefined&&saved.showCursors!==undefined)saved.cursorSee=saved.showCursors?'normal':'off';
+        if(saved.cursorSend===undefined&&saved.shareCursor!==undefined)saved.cursorSend=saved.shareCursor===false?'off':'normal';
+        delete saved.showCursors;delete saved.shareCursor;
+        return{...DEFAULT_UI_SETTINGS,...saved}}}catch(e){console.error('Failed to read saved UI settings',e)}return DEFAULT_UI_SETTINGS});
+    const uiSettingsRef=useRef(uiSettings); // for the sync loop, which starts once per room
+    uiSettingsRef.current=uiSettings;
     const[showSettings,setShowSettings]=useState(false);
     const[status,setStatus]=useState('');
     const[videoExporting,setVideoExporting]=useState(false);
@@ -82,6 +92,7 @@ function App(){
         }catch(e){console.error('Failed to read saved game',e)}
         return{step:'choose',closable:false}});
     const[mpPlayers,setMpPlayers]=useState({});
+    const mpPlayersShownRef=useRef({meta:'',cursors:'',cursorsAt:0}); // what mpPlayers last showed, so polls with no change skip a redraw
     const[mpStatus,setMpStatus]=useState('connecting');
     const mpServerLogRef=useRef([]); // the room's move log, in server order
     const mpServerOwnersRef=useRef([]); // owner tag of each entry, for game-over attribution
@@ -569,14 +580,31 @@ function App(){
         mpSyncingRef.current=true;
         mpRoundRef.current=null;
         mpLastEventSeqRef.current=null;
+        mpPlayersShownRef.current={meta:'',cursors:'',cursorsAt:0};
         Net.start({
             roomId:mpRoomId,
             playerId:mpPlayerId,
             name:mpName,
+            color:uiSettingsRef.current.myColor||'',
             onStatus:s=>{setMpStatus(s);if(s==='connected')setMpBackoff(null)},
             onBackoff:info=>setMpBackoff(info),
             onSync:data=>{
-                if(data.players)setMpPlayers(data.players);
+                if(data.players){
+                    // Redrawn only for a change: names, colours and views at once, others' cursors at the chosen rate
+                    // (Infrequent: once a second) and not at all while they're off.
+                    const see=uiSettingsRef.current.cursorSee,now=Date.now(),shown=mpPlayersShownRef.current;
+                    let meta='',cursors='';
+                    for(const pid in data.players){
+                        const p=data.players[pid]||{};
+                        meta+=`${pid}:${p.name}|${p.color}|${p.view?p.view.x+','+p.view.y:''};`;
+                        if(p.cursor)cursors+=`${pid}:${p.cursor.x},${p.cursor.y};`;
+                    }
+                    const cursorsDue=see!=='off'&&cursors!==shown.cursors&&(see!=='infrequent'||now-shown.cursorsAt>=CURSOR_INFREQUENT_MS);
+                    if(meta!==shown.meta||cursorsDue){
+                        setMpPlayers(data.players);
+                        mpPlayersShownRef.current={meta,cursors,cursorsAt:cursors!==shown.cursors?now:shown.cursorsAt};
+                    }
+                }
                 setMpFounderId(data.founderId||null);
                 setMpResetVote(data.resetVote||null);
                 if(typeof data.round==='number'){
@@ -596,7 +624,7 @@ function App(){
                         if(ev.seq>newest)newest=ev.seq;
                         if(lastSeen===null||ev.seq<=lastSeen||ev.by===mpPlayerId)continue;
                         if(ev.type==='ping'){
-                            if(!Number.isFinite(ev.x)||!Number.isFinite(ev.y))continue;
+                            if(!Number.isFinite(ev.x)||!Number.isFinite(ev.y)||uiSettingsRef.current.pingQuality==='off')continue;
                             const pinger=data.players&&data.players[ev.by];
                             addPing({x:ev.x,y:ev.y,color:(pinger&&pinger.color)||'#5b9bd5',name:ev.byName});
                             pushToast(`${ev.byName} pinged (${ev.x}, ${ev.y})`,()=>{setViewX(ev.x);setViewY(ev.y)},'ping:'+ev.by);
@@ -626,13 +654,17 @@ function App(){
     // eslint-disable-next-line react-hooks/exhaustive-deps
     },[mpRoomId,mpName,mpPlayerId,applyServerMoves,pushToast,addPing]);
 
-    // --- Multiplayer: our cursor, sent at up to 10 Hz unless sharing is off ---
+    // Cursor rates and colour from the settings. net.js may be an older cached copy without them.
+    useEffect(()=>{if(typeof Net.setCursorRates==='function')Net.setCursorRates(uiSettings.cursorSend,uiSettings.cursorSee)},[uiSettings.cursorSend,uiSettings.cursorSee]);
+    useEffect(()=>{if(Net.isRunning()&&typeof Net.updateColor==='function')Net.updateColor(uiSettings.myColor||'')},[uiSettings.myColor]);
+
+    // --- Multiplayer: our cursor, handed to Net at up to 10 Hz (it sends at the chosen rate) unless it's off ---
     const mpMouseRef=useRef(null); // the mouse's last client position while over the board
     useEffect(()=>{
         if(!mpRoomId||!containerRef.current)return;
         const el=containerRef.current;
         const hideCursor=()=>{if(typeof Net.hideCursor==='function')Net.hideCursor()}; // net.js may be an older cached copy
-        if(uiSettings.shareCursor===false){mpMouseRef.current=null;hideCursor();return}
+        if(uiSettings.cursorSend==='off'){mpMouseRef.current=null;hideCursor();return}
         let lastSentAt=0,lastX=null,lastY=null,trailing=null;
         const send=(clientX,clientY)=>{
             const[x,y]=screenToWorld(el.getBoundingClientRect(),clientX,clientY,cellSize,viewX,viewY);
@@ -654,7 +686,7 @@ function App(){
         el.addEventListener('mouseleave',onMouseLeave);
         return()=>{el.removeEventListener('mousemove',onMouseMove);el.removeEventListener('mouseleave',onMouseLeave);clearTimeout(trailing)};
     // mpPlayerId: Net starts once it's set, so a "sharing off" hide goes out then.
-    },[mpRoomId,mpPlayerId,cellSize,viewX,viewY,uiSettings.shareCursor]);
+    },[mpRoomId,mpPlayerId,cellSize,viewX,viewY,uiSettings.cursorSend]);
 
     // Middle-click pings the cell under the mouse for everyone in the room.
     const lastPingAtRef=useRef(0);
@@ -666,9 +698,9 @@ function App(){
         const[wx,wy]=screenToWorld(containerRef.current.getBoundingClientRect(),e.clientX,e.clientY,cellSize,viewX,viewY);
         const x=Math.floor(wx),y=Math.floor(wy);
         const self=mpPlayers[mpPlayerId];
-        addPing({x,y,color:(self&&self.color)||'#5b9bd5',name:mpName||'You'});
-        if(typeof Net.sendPing==='function')Net.sendPing(x,y);
-    },[mpRoomId,cellSize,viewX,viewY,mpPlayers,mpPlayerId,mpName,addPing]);
+        if(uiSettings.pingQuality!=='off')addPing({x,y,color:uiSettings.myColor||(self&&self.color)||'#5b9bd5',name:mpName||'You'});
+        if(typeof Net.sendPing==='function')Net.sendPing(x,y); // sent even with pings off, for the others
+    },[mpRoomId,cellSize,viewX,viewY,mpPlayers,mpPlayerId,mpName,addPing,uiSettings.myColor,uiSettings.pingQuality]);
 
     useEffect(()=>{if(mpName&&Net.isRunning())Net.updateName(mpName)},[mpName]);
 
@@ -1069,8 +1101,8 @@ function App(){
                     <div style={{display:'grid',gridTemplateColumns:`repeat(${cols},${cellSize}px)`,gridTemplateRows:`repeat(${rows},${cellSize}px)`,width:gridW,height:gridH}}>
                         {gridCells}
                     </div>
-                    {mpRoomId&&window.PingOverlay&&<PingOverlay pings={mpPings} viewX={viewX} viewY={viewY} cellSize={cellSize} containerSize={containerSize}/>}
-                    {mpRoomId&&uiSettings.showCursors&&<CursorOverlay players={mpPlayers} selfId={mpPlayerId} viewX={viewX} viewY={viewY} cellSize={cellSize} containerSize={containerSize}/>}
+                    {mpRoomId&&window.PingOverlay&&uiSettings.pingQuality!=='off'&&<PingOverlay pings={mpPings} viewX={viewX} viewY={viewY} cellSize={cellSize} containerSize={containerSize} quality={uiSettings.pingQuality}/>}
+                    {mpRoomId&&uiSettings.cursorSee!=='off'&&<CursorOverlay players={mpPlayers} selfId={mpPlayerId} viewX={viewX} viewY={viewY} cellSize={cellSize} containerSize={containerSize} glideMs={CURSOR_GLIDE_MS[uiSettings.cursorSee]??120}/>}
                 </div>
             </div>
             {!isFullscreen&&<div className="text-xs py-1" style={{color:'#9ca3af'}}>WASD/Arrows pan · Scroll zoom · Right-click flag{mpRoomId&&' · Middle-click ping'} · Click numbers to chord · First click always safe{status&&<span style={{color:'#c4b5fd',marginLeft:8}}>{status}</span>}</div>}
