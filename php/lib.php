@@ -10,8 +10,9 @@ const RATE_TOKENS_PER_SEC  = 12;      // above the client's maximum of 10 reques
 const VOTE_PASS_PCT        = 51;      // share of the room that must agree to start over
 const VOTE_TTL_SEC         = 30;      // an unresolved vote expires after this long
 const VOTE_RESULT_SEC      = 4;       // a resolved vote stays visible this long, so every client can show it
-const EVENTS_KEPT          = 20;      // recent events for clients to announce ("Alex used an undo")
+const EVENTS_KEPT          = 40;      // recent events for clients to announce ("Alex used an undo"), pings included
 const EVENT_SEND_SEC       = 10;      // only events this recent are sent
+const PING_MIN_GAP_SEC     = 0.3;     // a player's pings closer together than this are dropped
 const MAX_LOADED_LOG_CHARS = 2000000; // a save file's move log loaded into a room
 
 function rooms_dir(): string {
@@ -182,12 +183,13 @@ function start_new_round(array &$room, string &$moveLog, string &$moveOwners, in
     $room['resetVote'] = null;  // a reset settles any open vote
 }
 
-// Records something other players should be told about: 'undo', 'restart', 'new' or 'load'.
-function add_event(array &$room, string $type, string $playerId, string $name): void {
+// Records something other players should be told about: 'undo', 'restart', 'new', 'load', or 'ping' with the
+// pinged cell in $extra (['x' => int, 'y' => int]).
+function add_event(array &$room, string $type, string $playerId, string $name, array $extra = []): void {
     $seq = (int)($room['eventSeq'] ?? 0) + 1;
     $room['eventSeq'] = $seq;
     $events   = $room['events'] ?? [];
-    $events[] = ['seq' => $seq, 'type' => $type, 'by' => $playerId, 'byName' => $name, 'at' => time()];
+    $events[] = ['seq' => $seq, 'type' => $type, 'by' => $playerId, 'byName' => $name, 'at' => time()] + $extra;
     $room['events'] = array_slice($events, -EVENTS_KEPT);
 }
 
@@ -195,7 +197,10 @@ function recent_events(array $room): array {
     $cutoff = time() - EVENT_SEND_SEC;
     $out = [];
     foreach ($room['events'] ?? [] as $e) {
-        if ($e['at'] >= $cutoff) $out[] = ['seq' => $e['seq'], 'type' => $e['type'], 'by' => $e['by'], 'byName' => $e['byName']];
+        if ($e['at'] < $cutoff) continue;
+        $sent = ['seq' => $e['seq'], 'type' => $e['type'], 'by' => $e['by'], 'byName' => $e['byName']];
+        if (isset($e['x'], $e['y'])) { $sent['x'] = $e['x']; $sent['y'] = $e['y']; }
+        $out[] = $sent;
     }
     return $out;
 }

@@ -14,6 +14,7 @@ $playerId        = $body['playerId'] ?? '';
 $name            = isset($body['name']) ? sanitize_name((string)$body['name']) : 'Player';
 $cursor          = $body['cursor'] ?? null;
 $view            = $body['view']   ?? null;
+$ping            = (isset($body['ping']) && is_array($body['ping'])) ? $body['ping'] : null;
 $moves           = is_array($body['moves'] ?? null) ? $body['moves'] : [];
 $clientRevision  = isset($body['logRevision']) ? (int)$body['logRevision'] : 0;
 $clientHints     = (isset($body['hints']) && is_array($body['hints'])) ? $body['hints'] : null;
@@ -44,7 +45,10 @@ if (!take_rate_token($player)) {
 $player['name']     = $name;
 $player['color']    = color_from_name($name);
 $player['lastSeen'] = time();
-if (is_array($cursor) && isset($cursor['x'], $cursor['y'])) {
+// {hidden: true}: the mouse left the board or the player stopped sharing it.
+if (is_array($cursor) && !empty($cursor['hidden'])) {
+    $player['cursor'] = null;
+} elseif (is_array($cursor) && isset($cursor['x'], $cursor['y'])) {
     $player['cursor'] = [
         'x'        => (float)$cursor['x'],
         'y'        => (float)$cursor['y'],
@@ -57,6 +61,18 @@ if (is_array($view) && isset($view['x'], $view['y'])) {
         'x' => (int)$view['x'],
         'y' => (int)$view['y'],
     ];
+}
+// A middle-click ping on a cell, announced to the others as an event. Bad or too-frequent pings are dropped.
+$pinged = false;
+if ($ping !== null && is_numeric($ping['x'] ?? null) && is_numeric($ping['y'] ?? null)) {
+    $px = (float)$ping['x'];
+    $py = (float)$ping['y'];
+    $now = microtime(true);
+    if (abs($px) <= 1e9 && abs($py) <= 1e9 && $now - (float)($player['lastPingAt'] ?? 0) >= PING_MIN_GAP_SEC) {
+        $player['lastPingAt'] = $now;
+        add_event($room, 'ping', $playerId, $name, ['x' => (int)floor($px), 'y' => (int)floor($py)]);
+        $pinged = true;
+    }
 }
 $room['players'][$playerId] = $player;
 
@@ -163,7 +179,7 @@ if (resolve_reset_vote($room) === 'passed') {
 }
 $voteChanged = $resetRequest !== null || $voteReply !== null || ($room['resetVote'] ?? null) !== $voteBefore;
 
-if ($logChanges > 0 || $cursor !== null || $view !== null || $clientHints !== null || $voteChanged || !isset($room['version'])) {
+if ($logChanges > 0 || $cursor !== null || $view !== null || $clientHints !== null || $voteChanged || $pinged || !isset($room['version'])) {
     $room['version']      = ($room['version'] ?? 0) + 1;
     $room['moveLog']      = $moveLog;
     $room['moveOwners']   = $moveOwners;

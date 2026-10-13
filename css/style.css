@@ -63,6 +63,17 @@ body{background:#080816;min-height:100vh;display:flex;flex-direction:column;alig
 .toast-sub{color:#8b8ba8;font-size:12px;margin-top:3px}
 .toast-actions{display:flex;gap:6px;margin-top:8px}
 @keyframes tslide{from{transform:translateX(16px);opacity:0}to{transform:none;opacity:1}}
+.toast-link{cursor:pointer}
+.toast-link:hover{border-color:#6366f1;color:#fff}
+/* Middle-click pings (PingOverlay): rings on the cell, or an arrow on the board's edge. --c is the pinger's colour, --s the ring size. */
+.ping,.ping-edge{position:absolute;width:0;height:0}
+.ping-ring{position:absolute;left:calc(var(--s) / -2);top:calc(var(--s) / -2);width:var(--s);height:var(--s);border:3px solid var(--c);border-radius:50%;box-shadow:0 0 8px var(--c),inset 0 0 8px var(--c);animation:ping-ring 1.2s ease-out 3 both}
+.ping-dot{position:absolute;left:-6px;top:-6px;width:12px;height:12px;border-radius:50%;background:var(--c);box-shadow:0 0 0 2px rgba(0,0,0,.5),0 0 12px var(--c);animation:ping-dot 4s ease forwards}
+@keyframes ping-ring{from{transform:scale(.2);opacity:1}to{transform:scale(1);opacity:0}}
+@keyframes ping-dot{0%{transform:scale(0)}8%{transform:scale(1.3)}15%,85%{transform:scale(1);opacity:1}100%{transform:scale(.6);opacity:0}}
+.ping-edge-arrow{position:absolute;left:0;top:0;width:0;height:0;border-top:9px solid transparent;border-bottom:9px solid transparent;border-left:16px solid var(--c);filter:drop-shadow(0 0 3px rgba(0,0,0,.9));animation:ping-edge 1s ease-in-out infinite}
+.ping-edge-label{position:absolute;background:var(--c);color:#fff;font-size:11px;font-weight:600;padding:2px 6px;border-radius:4px;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.4)}
+@keyframes ping-edge{50%{opacity:.45}}
 .start-panel{width:400px;min-width:0;max-height:90vh;overflow-y:auto;position:relative}
 .start-panel .start-x{position:absolute;top:8px;right:10px;background:transparent;border:0;color:#666;font-size:22px;line-height:1;padding:2px 6px}
 .start-panel button.start-x:hover:not(:disabled){background:transparent;border:0;color:#aaa}

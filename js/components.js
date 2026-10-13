@@ -112,6 +112,10 @@ window.SettingsModal=function SettingsModal({hints,setHints,uiSettings,setUiSett
                     <Checkbox label="Lock button" dim checked={uiSettings.showLockBtn} onChange={e=>setUiSettings(u=>({...u,showLockBtn:e.target.checked}))}/>
                 </SubOptions>}
 
+                <SectionHeading>Multiplayer</SectionHeading>
+                <Checkbox label="Show other players' cursors" checked={!!uiSettings.showCursors} onChange={e=>setUiSettings(u=>({...u,showCursors:e.target.checked}))}/>
+                <Checkbox label="Share my cursor" checked={uiSettings.shareCursor!==false} onChange={e=>setUiSettings(u=>({...u,shareCursor:e.target.checked}))}/>
+
                 <SectionHeading>Hints</SectionHeading>
                 <HintOptions hints={hints} setHints={setHints}/>
 
@@ -467,19 +471,23 @@ window.NamePromptModal=function NamePromptModal({initial,onSubmit,onCancel}){
     );
 };
 
+// Where world cell (leftX, topY) sits in the board container: the inverse of screenToWorld in app.js.
+function boardOrigin(size,cellSize,viewX,viewY){
+    const cols=Math.floor(size.w/cellSize),rows=Math.floor(size.h/cellSize);
+    return{padX:(size.w-cols*cellSize)/2,padY:(size.h-rows*cellSize)/2,leftX:viewX-Math.floor(cols/2),topY:viewY-Math.floor(rows/2)};
+}
+
 // Other players' cursors, positioned with the same world-to-screen maths as the grid.
-window.CursorOverlay=function CursorOverlay({players,selfId,viewX,viewY,cellSize,containerRect}){
-    if(!containerRect||!players)return null;
-    const cols=Math.floor(containerRect.width/cellSize),rows=Math.floor(containerRect.height/cellSize);
-    const padX=(containerRect.width-cols*cellSize)/2,padY=(containerRect.height-rows*cellSize)/2;
-    const leftX=viewX-Math.floor(cols/2),topY=viewY-Math.floor(rows/2);
+window.CursorOverlay=function CursorOverlay({players,selfId,viewX,viewY,cellSize,containerSize}){
+    if(!containerSize||!players)return null;
+    const{padX,padY,leftX,topY}=boardOrigin(containerSize,cellSize,viewX,viewY);
     const cursors=[];
     for(const pid in players){
         if(pid===selfId)continue;
         const p=players[pid];if(!p||!p.cursor)continue;
         const cx=padX+(p.cursor.x-leftX)*cellSize;
         const cy=padY+(p.cursor.y-topY)*cellSize;
-        if(cx<-40||cy<-40||cx>containerRect.width+40||cy>containerRect.height+40)continue; // off screen
+        if(cx<-40||cy<-40||cx>containerSize.w+40||cy>containerSize.h+40)continue; // off screen
         cursors.push({pid,p,cx,cy});
     }
     return(
@@ -496,6 +504,38 @@ window.CursorOverlay=function CursorOverlay({players,selfId,viewX,viewY,cellSize
     );
 };
 
+// Middle-click pings: rings on the pinged cell, or an arrow on the board's edge pointing at an off-screen one.
+const PING_EDGE_INSET=18;
+window.PingOverlay=function PingOverlay({pings,viewX,viewY,cellSize,containerSize}){
+    if(!containerSize||!pings||!pings.length)return null;
+    const{padX,padY,leftX,topY}=boardOrigin(containerSize,cellSize,viewX,viewY);
+    const w=containerSize.w,h=containerSize.h;
+    return(
+        <div style={{position:'absolute',left:0,top:0,width:'100%',height:'100%',pointerEvents:'none',zIndex:49,overflow:'hidden'}}>
+            {pings.map(p=>{
+                const cx=padX+(p.x-leftX+0.5)*cellSize,cy=padY+(p.y-topY+0.5)*cellSize;
+                if(cx>=0&&cy>=0&&cx<=w&&cy<=h)return(
+                    <div key={p.id} className="ping" style={{left:cx,top:cy,'--c':p.color,'--s':cellSize*2.2+'px'}}>
+                        <div className="ping-ring"/><div className="ping-ring" style={{animationDelay:'.5s'}}/><div className="ping-dot"/>
+                    </div>
+                );
+                // Off screen: walk from the centre toward the ping until it meets the inset edge.
+                const dx=cx-w/2,dy=cy-h/2;
+                const scale=Math.min((w/2-PING_EDGE_INSET)/Math.abs(dx||1e-9),(h/2-PING_EDGE_INSET)/Math.abs(dy||1e-9));
+                const angle=Math.atan2(dy,dx)*180/Math.PI;
+                // The name sits on the board's side of the arrow, so the edge never clips it.
+                const labelPos={[dx<0?'left':'right']:14,[dy<0?'top':'bottom']:2};
+                return(
+                    <div key={p.id} className="ping-edge" style={{left:w/2+dx*scale,top:h/2+dy*scale,'--c':p.color}}>
+                        <div className="ping-edge-arrow" style={{transform:`translate(-50%,-50%) rotate(${angle}deg)`}}/>
+                        <div className="ping-edge-label" style={labelPos}>{p.name}</div>
+                    </div>
+                );
+            })}
+        </div>
+    );
+};
+
 // Top-right notices: the start-over vote, and short-lived ones like "Alex used an undo" so changes others make
 // don't come out of nowhere. Sits above modals, since the game-over modal may be open when a vote starts.
 window.ToastStack=function ToastStack({toasts,vote,selfId,onVote,children}){
@@ -504,7 +544,7 @@ window.ToastStack=function ToastStack({toasts,vote,selfId,onVote,children}){
         <div className="toast-stack">
             {children}
             {vote&&<ResetVoteToast key={vote.id} vote={vote} selfId={selfId} onVote={onVote}/>}
-            {toasts.map(t=><div key={t.id} className="toast">{t.text}</div>)}
+            {toasts.map(t=><div key={t.id} className={t.onClick?'toast toast-link':'toast'} onClick={t.onClick}>{t.text}</div>)}
         </div>
     );
 };

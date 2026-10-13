@@ -1,9 +1,10 @@
 // app.js – App component and ReactDOM render (JSX, compiled by Babel in the browser)
 const{useState,useCallback,useMemo,useEffect,useRef}=React;
 
-const DEFAULT_UI_SETTINGS={showArrows:true,showScores:true,showLeaderboard:true,showUndo:true,showZoom:true,showCoords:true,showSeed:true,showSeedBox:true,showLockBtn:true,defaultCellSize:CELL_SIZE_DEFAULT,exportRes:'auto',tlMovesPerFrame:1,tlFps:60,tlRes:'auto'};
+const DEFAULT_UI_SETTINGS={showArrows:true,showScores:true,showLeaderboard:true,showUndo:true,showZoom:true,showCoords:true,showSeed:true,showSeedBox:true,showLockBtn:true,defaultCellSize:CELL_SIZE_DEFAULT,exportRes:'auto',tlMovesPerFrame:1,tlFps:60,tlRes:'auto',showCursors:false,shareCursor:true};
 const CLEARED_PER_UNDO=1000;
 const MAX_VIDEO_BYTES=50e6; // timelapse.js has the same limit
+const PING_SHOW_MS=4000,MAX_PINGS_SHOWN=10,PING_COOLDOWN_MS=400; // middle-click pings in a room
 
 // The world position (in fractional cells) under a screen point, for a view centred on viewX, viewY.
 function screenToWorld(rect,clientX,clientY,cellSize,viewX,viewY){
@@ -94,10 +95,19 @@ function App(){
     const[mpToasts,setMpToasts]=useState([]);
     const mpToastIdRef=useRef(0);
     const mpLastEventSeqRef=useRef(null);
-    const pushToast=useCallback(text=>{
+    // key: a new toast replaces any showing with the same key (one ping toast per player).
+    const pushToast=useCallback((text,onClick,key)=>{
         const id=++mpToastIdRef.current;
-        setMpToasts(ts=>[...ts.slice(-3),{id,text}]);
+        setMpToasts(ts=>[...ts.filter(t=>!key||t.key!==key).slice(-3),{id,text,onClick,key}]);
         setTimeout(()=>setMpToasts(ts=>ts.filter(t=>t.id!==id)),5000);
+    },[]);
+    // Middle-click pings on the board, ours and other players': {id, x, y, color, name}.
+    const[mpPings,setMpPings]=useState([]);
+    const mpPingIdRef=useRef(0);
+    const addPing=useCallback(ping=>{
+        const id=++mpPingIdRef.current;
+        setMpPings(ps=>[...ps.slice(-(MAX_PINGS_SHOWN-1)),{...ping,id}]);
+        setTimeout(()=>setMpPings(ps=>ps.filter(p=>p.id!==id)),PING_SHOW_MS);
     },[]);
 
     const savedSignatureRef=useRef('');
@@ -585,6 +595,13 @@ function App(){
                     for(const ev of data.events){
                         if(ev.seq>newest)newest=ev.seq;
                         if(lastSeen===null||ev.seq<=lastSeen||ev.by===mpPlayerId)continue;
+                        if(ev.type==='ping'){
+                            if(!Number.isFinite(ev.x)||!Number.isFinite(ev.y))continue;
+                            const pinger=data.players&&data.players[ev.by];
+                            addPing({x:ev.x,y:ev.y,color:(pinger&&pinger.color)||'#5b9bd5',name:ev.byName});
+                            pushToast(`${ev.byName} pinged (${ev.x}, ${ev.y})`,()=>{setViewX(ev.x);setViewY(ev.y)},'ping:'+ev.by);
+                            continue;
+                        }
                         const msg={undo:'used an undo',restart:'restarted the board',new:'started a new game',load:'loaded a save file'}[ev.type];
                         if(msg)pushToast(`${ev.byName} ${msg}`);
                     }
@@ -607,24 +624,51 @@ function App(){
         return()=>{Net.stop();mpSyncingRef.current=false};
     // Started once per room, name and player id, so activeSeed is left out.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    },[mpRoomId,mpName,mpPlayerId,applyServerMoves,pushToast]);
+    },[mpRoomId,mpName,mpPlayerId,applyServerMoves,pushToast,addPing]);
 
-    // --- Multiplayer: our cursor, sent at up to 10 Hz ---
+    // --- Multiplayer: our cursor, sent at up to 10 Hz unless sharing is off ---
+    const mpMouseRef=useRef(null); // the mouse's last client position while over the board
     useEffect(()=>{
         if(!mpRoomId||!containerRef.current)return;
         const el=containerRef.current;
-        let lastSentAt=0,lastX=null,lastY=null;
-        const onMouseMove=e=>{
-            const now=Date.now();
-            if(now-lastSentAt<100)return;
-            const[x,y]=screenToWorld(el.getBoundingClientRect(),e.clientX,e.clientY,cellSize,viewX,viewY);
+        const hideCursor=()=>{if(typeof Net.hideCursor==='function')Net.hideCursor()}; // net.js may be an older cached copy
+        if(uiSettings.shareCursor===false){mpMouseRef.current=null;hideCursor();return}
+        let lastSentAt=0,lastX=null,lastY=null,trailing=null;
+        const send=(clientX,clientY)=>{
+            const[x,y]=screenToWorld(el.getBoundingClientRect(),clientX,clientY,cellSize,viewX,viewY);
             if(lastX!==null&&Math.abs(x-lastX)<0.1&&Math.abs(y-lastY)<0.1)return;
-            lastSentAt=now;lastX=x;lastY=y;
+            lastSentAt=Date.now();lastX=x;lastY=y;
             Net.sendCursor(x,y,cellSize);
         };
+        const onMouseMove=e=>{
+            mpMouseRef.current={x:e.clientX,y:e.clientY};
+            clearTimeout(trailing);
+            const wait=lastSentAt+100-Date.now();
+            if(wait<=0)send(e.clientX,e.clientY);
+            else trailing=setTimeout(()=>{const m=mpMouseRef.current;if(m)send(m.x,m.y)},wait); // so the resting spot is sent
+        };
+        const onMouseLeave=()=>{mpMouseRef.current=null;clearTimeout(trailing);hideCursor()};
+        // A pan or zoom moves the board under a still mouse.
+        if(mpMouseRef.current)send(mpMouseRef.current.x,mpMouseRef.current.y);
         el.addEventListener('mousemove',onMouseMove);
-        return()=>el.removeEventListener('mousemove',onMouseMove);
-    },[mpRoomId,cellSize,viewX,viewY]);
+        el.addEventListener('mouseleave',onMouseLeave);
+        return()=>{el.removeEventListener('mousemove',onMouseMove);el.removeEventListener('mouseleave',onMouseLeave);clearTimeout(trailing)};
+    // mpPlayerId: Net starts once it's set, so a "sharing off" hide goes out then.
+    },[mpRoomId,mpPlayerId,cellSize,viewX,viewY,uiSettings.shareCursor]);
+
+    // Middle-click pings the cell under the mouse for everyone in the room.
+    const lastPingAtRef=useRef(0);
+    const handleBoardMouseDown=useCallback(e=>{
+        if(e.button!==1||!mpRoomId||!containerRef.current)return;
+        e.preventDefault(); // no autoscroll
+        if(Date.now()-lastPingAtRef.current<PING_COOLDOWN_MS)return;
+        lastPingAtRef.current=Date.now();
+        const[wx,wy]=screenToWorld(containerRef.current.getBoundingClientRect(),e.clientX,e.clientY,cellSize,viewX,viewY);
+        const x=Math.floor(wx),y=Math.floor(wy);
+        const self=mpPlayers[mpPlayerId];
+        addPing({x,y,color:(self&&self.color)||'#5b9bd5',name:mpName||'You'});
+        if(typeof Net.sendPing==='function')Net.sendPing(x,y);
+    },[mpRoomId,cellSize,viewX,viewY,mpPlayers,mpPlayerId,mpName,addPing]);
 
     useEffect(()=>{if(mpName&&Net.isRunning())Net.updateName(mpName)},[mpName]);
 
@@ -1021,14 +1065,15 @@ function App(){
                 <button className="hb" title="Settings" style={{position:'absolute',right:8,top:'50%',transform:'translateY(-50%)'}} onClick={()=>setShowSettings(true)}>⚙</button>
             </div>
             <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',width:'100%',overflow:'hidden'}}>
-                <div ref={containerRef} className="game-container" style={{...containerStyle,position:'relative'}} onContextMenu={e=>e.preventDefault()} onWheel={handleWheel}>
+                <div ref={containerRef} className="game-container" style={{...containerStyle,position:'relative'}} onContextMenu={e=>e.preventDefault()} onWheel={handleWheel} onMouseDown={handleBoardMouseDown}>
                     <div style={{display:'grid',gridTemplateColumns:`repeat(${cols},${cellSize}px)`,gridTemplateRows:`repeat(${rows},${cellSize}px)`,width:gridW,height:gridH}}>
                         {gridCells}
                     </div>
-                    {mpRoomId&&<CursorOverlay players={mpPlayers} selfId={mpPlayerId} viewX={viewX} viewY={viewY} cellSize={cellSize} containerSize={containerSize}/>}
+                    {mpRoomId&&window.PingOverlay&&<PingOverlay pings={mpPings} viewX={viewX} viewY={viewY} cellSize={cellSize} containerSize={containerSize}/>}
+                    {mpRoomId&&uiSettings.showCursors&&<CursorOverlay players={mpPlayers} selfId={mpPlayerId} viewX={viewX} viewY={viewY} cellSize={cellSize} containerSize={containerSize}/>}
                 </div>
             </div>
-            {!isFullscreen&&<div className="text-xs py-1" style={{color:'#9ca3af'}}>WASD/Arrows pan · Scroll zoom · Right-click flag · Click numbers to chord · First click always safe{status&&<span style={{color:'#c4b5fd',marginLeft:8}}>{status}</span>}</div>}
+            {!isFullscreen&&<div className="text-xs py-1" style={{color:'#9ca3af'}}>WASD/Arrows pan · Scroll zoom · Right-click flag{mpRoomId&&' · Middle-click ping'} · Click numbers to chord · First click always safe{status&&<span style={{color:'#c4b5fd',marginLeft:8}}>{status}</span>}</div>}
         </div>);
 }
 

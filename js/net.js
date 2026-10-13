@@ -21,9 +21,11 @@
     let pendingHints = null;
     let pendingReset = null;
     let pendingVote = null;
+    let pendingPing = null;
     let viewCenter = null;       // sent with every request once set
     let lastActivityAt = 0;      // last local input or remote change; picks the poll rate
     let lastOthersPositions = '';
+    let lastEventSeq = 0;        // newest room event seen; a newer one (e.g. a ping) counts as activity
     let nextSyncAt = 0;
     let lastSentAt = 0;
     let resendWhenDone = false;  // a click came in mid-request
@@ -89,6 +91,8 @@
         pendingReset = null;
         const vote = pendingVote;
         pendingVote = null;
+        const ping = pendingPing;
+        pendingPing = null;
 
         try {
             const res = await fetch(config.endpoint, {
@@ -108,6 +112,7 @@
                     round, // the server drops moves and resets from an older round
                     reset,
                     vote,
+                    ping,
                 }),
                 cache: 'no-store', // never from the service worker's cache
             });
@@ -122,9 +127,11 @@
             if (typeof data.round === 'number') round = data.round;
             // Others' activity keeps the active rate too, so watching someone play stays smooth.
             const positions = otherPlayersPositions(data.players);
+            const newestEventSeq = Array.isArray(data.events) ? data.events.reduce((m, e) => Math.max(m, e.seq || 0), lastEventSeq) : lastEventSeq;
             if (positions !== lastOthersPositions || (data.newMoves && data.newMoves.length) || typeof data.moveLog === 'string'
-                    || (data.resetVote && data.resetVote.status === 'open')) markActive();
+                    || (data.resetVote && data.resetVote.status === 'open') || newestEventSeq > lastEventSeq) markActive();
             lastOthersPositions = positions;
+            lastEventSeq = newestEventSeq;
             if (config.onSync) config.onSync(data);
         } catch (err) {
             // Requeue everything unsent, so a failed request loses nothing.
@@ -132,6 +139,7 @@
             if (hints && !pendingHints) pendingHints = hints;
             if (reset && !pendingReset) pendingReset = reset;
             if (vote && !pendingVote) pendingVote = vote;
+            if (ping && !pendingPing) pendingPing = ping;
             failedSyncs++;
             if (config.onStatus) config.onStatus('disconnected');
             if (config.onError) config.onError(err);
@@ -163,9 +171,11 @@
             pendingHints = null;
             pendingReset = null;
             pendingVote = null;
+            pendingPing = null;
             viewCenter = null;
             lastActivityAt = Date.now(); // at the active rate while the room loads in
             lastOthersPositions = '';
+            lastEventSeq = 0;
             resendWhenDone = false;
             failedSyncs = 0;
             sync();
@@ -193,6 +203,19 @@
             if (!running) return;
             pendingCursor = {x, y, cellSize};
             markActive();
+        },
+        // The mouse left the board, or we stopped sharing it: the server clears our cursor for everyone.
+        hideCursor(){
+            if (!running) return;
+            pendingCursor = {hidden: true};
+            markActive();
+        },
+        // A middle-click ping on cell (x, y); the others see it as a 'ping' event.
+        sendPing(x, y){
+            if (!running) return;
+            pendingPing = {x, y};
+            markActive();
+            sendSoon();
         },
         // Shared gameplay hints only; UI settings stay local.
         sendHints(hints){
