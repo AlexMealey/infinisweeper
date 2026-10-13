@@ -86,7 +86,7 @@ Browsers only enable the service worker (offline play, "Install app") on HTTPS o
 
 4. Tell players to refresh the page.
 
-If you changed any front-end file (`index.html`, `css/`, `js/`), bump `CACHE_NAME` in `sw.js` before committing. The service worker serves cached files first, so without the bump, HTTPS players keep the old version.
+Players get the new version on their next load or refresh. The service worker asks the server first and only uses its cached copy when the server is unreachable or takes over 4 seconds. If you add a front-end file, also list it in `PRE_CACHE` in `sw.js` so it works offline from the first visit.
 
 Each rebuild leaves an old image behind. Clear them now and then with `docker image prune -f`.
 

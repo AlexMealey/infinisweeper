@@ -1,4 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="body" cx="0.36" cy="0.32" r="0.75">
+      <stop offset="0" stop-color="#6a6a9a"/>
+      <stop offset="0.45" stop-color="#2c2c4a"/>
+      <stop offset="1" stop-color="#12122a"/>
+    </radialGradient>
+  </defs>
   <rect width="512" height="512" rx="80" fill="#080816"/>
-  <text x="256" y="330" font-size="300" text-anchor="middle" font-family="serif">💣</text>
+  <g transform="translate(-14 14)">
+    <path d="M336 168 C 360 120, 400 112, 418 96" fill="none" stroke="#d9b37a" stroke-width="14" stroke-linecap="round"/>
+    <rect x="290" y="150" width="76" height="56" rx="10" transform="rotate(45 328 178)" fill="#8b8ba8" stroke="#48486a" stroke-width="6"/>
+    <circle cx="240" cy="290" r="146" fill="url(#body)" stroke="#48486a" stroke-width="6"/>
+    <ellipse cx="190" cy="232" rx="44" ry="26" transform="rotate(-38 190 232)" fill="#fff" opacity="0.35"/>
+    <path d="M424 46 L436 78 L470 70 L446 96 L470 120 L436 114 L424 146 L412 114 L378 120 L402 96 L378 70 L412 78 Z" fill="#fbbf24" stroke="#f87171" stroke-width="5" stroke-linejoin="round"/>
+    <circle cx="424" cy="96" r="12" fill="#fff7d6"/>
+  </g>
 </svg>
