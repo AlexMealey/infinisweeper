@@ -123,10 +123,15 @@ function App(){
         setTimeout(()=>setMpPings(ps=>ps.filter(p=>p.id!==id)),PING_SHOW_MS);
     },[]);
 
-    const savedSignatureRef=useRef('');
+    const savedSignatureRef=useRef(''); // the game stored for the next visit, so an unchanged one isn't stored again
     const saveSignature=save=>{
         const logLength=typeof save.moveLog==='string'?save.moveLog.length:(Array.isArray(save.moveLog)?save.moveLog.length:0);
         return logLength+'|'+save.activeSeed+'|'+save.locked+'|'+save.viewMode+'|'+save.cellSize+'|'+save.viewX+'|'+save.viewY+'|'+JSON.stringify(save.hints);
+    };
+    // Stores save as the game the next visit restores. Not in a room: the server holds that game.
+    const storeSave=save=>{
+        try{localStorage.setItem('minesweeper_save',JSON.stringify(save));savedSignatureRef.current=saveSignature(save);return true}
+        catch(e){console.error('Failed to store the game for the next visit',e);return false}
     };
 
     useEffect(()=>{try{localStorage.setItem('minesweeper_hints',JSON.stringify(hints))}catch(e){console.error('Failed to save hints',e)}},[hints]);
@@ -190,7 +195,7 @@ function App(){
     const downloadSave=()=>{
         const save=buildSave();
         downloadBlob(new Blob([JSON.stringify(save,null,2)],{type:'application/json'}),`${exportFileDate()}-minesweeper-save.json`,0);
-        savedSignatureRef.current=saveSignature(save);
+        if(!mpRoomId)storeSave(save); // so a reload brings back what the file has, even moves too recent for the auto-save
         showStatus('Save file downloaded')};
 
     const importSaveFile=e=>{
@@ -202,7 +207,7 @@ function App(){
                 if(data.version===1||data.version===2||data.version===3){
                     if(moves>0&&!confirm('Overwrite current progress?'))return;
                     if(loadSave(data)){
-                        savedSignatureRef.current=saveSignature(data);
+                        storeSave(data); // replaces the previous game, so a reload doesn't bring that one back
                         showStatus('Save file loaded successfully');
                     }else showStatus('Invalid save file')}
                 else showStatus('Incompatible save version')}
@@ -496,9 +501,7 @@ function App(){
             if(!save.moveLog)return;
             const signature=saveSignature(save);
             if(signature===savedSignatureRef.current)return;
-            localStorage.setItem('minesweeper_save',JSON.stringify(save));
-            savedSignatureRef.current=signature;
-            showStatus('Progress auto-saved');
+            if(storeSave(save))showStatus('Progress auto-saved');
         },1200);
         return()=>clearTimeout(t)},[buildSave,showStatus,mpRoomId]);
 
