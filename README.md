@@ -45,6 +45,28 @@ docker run -d --name infinisweeper --restart unless-stopped \
   infinisweeper
 ```
 
+## Deploy on Pterodactyl
+
+`pterodactyl/egg-infinisweeper.json` is an egg for Pterodactyl (or Pelican). It serves the game on the port you allocate to the server. It runs PHP's built-in web server instead of Apache: the install script downloads a static PHP build from static-php.dev, and `pterodactyl/router.php` serves only the files the Docker image does.
+
+1. Admin panel → **Nests** → pick or create a nest → **Import Egg**, and upload `pterodactyl/egg-infinisweeper.json`.
+2. Make sure the node has the port you want: **Nodes** → your node → **Allocation**.
+3. **Servers** → **Create New**. Pick that IP and port as the **Default Allocation** and choose the InfiniSweeper egg; the variable defaults work. 256 MB of memory and 1 GB of disk are plenty.
+4. When the install finishes, start the server. It's up when the console shows `Development Server (http://0.0.0.0:<port>) started`.
+5. Open `http://<server-ip>:<port>`.
+
+| Variable | Default | |
+|---|---|---|
+| Git Repository | this repo | Where the game is downloaded from |
+| Git Branch | `main` | |
+| Auto Update | `1` | Pull the latest commit from the branch on every start |
+| PHP Workers | `4` | Requests handled at once |
+| PHP Version | `8.4` | Static PHP version to install |
+
+To update, push to the branch and restart the server. With Auto Update off, or after changing the repository or PHP version, use **Settings** → **Reinstall Server** instead. Either way, files you changed in the server folder are overwritten. Room saves in `data/rooms` are kept and expire after 24 hours, as with Docker.
+
+To change the port later, add the new port to the node, set it as the server's primary allocation under **Build Configuration**, and restart.
+
 ## Change the port
 
 ```sh
