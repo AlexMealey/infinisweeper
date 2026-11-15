@@ -94,9 +94,9 @@ function new_room_state(string $seed, ?array $hints, string $founderId): array {
     $defaultHints = [
         'wrongFlags'      => false,
         'pulseNeighbors'  => false,
-        'undoEnabled'     => false,
-        'undoMode'        => 'refill',
-        'chordFlag'       => false,
+        'undoEnabled'     => true,
+        'undoMode'        => 'infinite',
+        'chordFlag'       => true,
     ];
     return [
         'version'      => 0,

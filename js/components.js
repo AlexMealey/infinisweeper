@@ -135,7 +135,7 @@ window.SettingsModal=function SettingsModal({hints,setHints,uiSettings,setUiSett
                 <ColorChoice value={uiSettings.myColor||''} onChange={c=>setUiSettings(u=>({...u,myColor:c}))}/>
                 <div style={{display:'flex',alignItems:'center',gap:8,padding:'2px 0'}}>
                     <span style={{color:'#aaa',fontSize:12,minWidth:82}}>Others' cursors</span>
-                    <select className="hs" value={uiSettings.cursorSee||'off'} onChange={e=>setUiSettings(u=>({...u,cursorSee:e.target.value}))}>
+                    <select className="hs" value={uiSettings.cursorSee||'normal'} onChange={e=>setUiSettings(u=>({...u,cursorSee:e.target.value}))}>
                         <option value="off">Off</option><option value="infrequent">Infrequent (1×/s)</option><option value="normal">Normal (4×/s)</option><option value="frequent">Frequent (10×/s)</option>
                     </select>
                 </div>
@@ -147,7 +147,7 @@ window.SettingsModal=function SettingsModal({hints,setHints,uiSettings,setUiSett
                 </div>
                 <div style={{display:'flex',alignItems:'center',gap:8,padding:'2px 0'}}>
                     <span style={{color:'#aaa',fontSize:12,minWidth:82}}>Pings</span>
-                    <select className="hs" value={uiSettings.pingQuality||'full'} onChange={e=>setUiSettings(u=>({...u,pingQuality:e.target.value}))}>
+                    <select className="hs" value={uiSettings.pingQuality||'light'} onChange={e=>setUiSettings(u=>({...u,pingQuality:e.target.value}))}>
                         <option value="off">Off</option><option value="low">Low (still blob)</option><option value="light">Light animation</option><option value="full">Full animation</option>
                     </select>
                 </div>
