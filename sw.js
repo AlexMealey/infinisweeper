@@ -1,4 +1,4 @@
-const CACHE_NAME = 'infinisweeper-v29';
+const CACHE_NAME = 'infinisweeper-v30';
 
 // After this long, a slow network loses to the cached copy. The fetch still finishes and refreshes the cache.
 const NETWORK_TIMEOUT_MS = 4000;
@@ -8,6 +8,7 @@ const CDN_TO_LOCAL = {
   'https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js': './lib/react-dom.production.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js': './lib/babel.min.js',
   'https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.js': './lib/mp4-muxer.js',
+  // Only pages cached before Tailwind was dropped still ask for it; it's no longer pre-cached.
   'https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css': './lib/tailwind.min.css',
 };
 
@@ -30,7 +31,6 @@ const PRE_CACHE = [
   './lib/react-dom.production.min.js',
   './lib/babel.min.js',
   './lib/mp4-muxer.js',
-  './lib/tailwind.min.css',
 ];
 
 // Every page of the app is index.html; ?seed= and ?room= are read by the page itself.

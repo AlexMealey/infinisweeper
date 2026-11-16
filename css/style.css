@@ -1,4 +1,26 @@
 *{margin:0;padding:0;box-sizing:border-box}
+/* What the app used from Tailwind 2.2's base styles. Tailwind itself is gone: its 1,548 sibling rules
+   (".space-x-4 > :not([hidden]) ~ :not([hidden])") made Chrome restyle every cell on each pan. */
+*,::before,::after{border:0 solid #e5e7eb}
+html{line-height:1.5;-webkit-text-size-adjust:100%}
+h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}
+button,input,optgroup,select,textarea{font-family:inherit;font-size:100%;line-height:inherit;color:inherit}
+button,select{text-transform:none}
+button,[type=button],[type=reset],[type=submit]{-webkit-appearance:button}
+button{background-color:transparent;background-image:none}
+[role=button],button{cursor:pointer}
+input::placeholder,textarea::placeholder{opacity:1;color:#9ca3af}
+svg{display:block;vertical-align:middle}
+::-moz-focus-inner{border-style:none;padding:0}
+:-moz-focusring{outline:auto}
+/* The Tailwind utility classes the markup uses. Kept above the app's own rules, so those still win as before (e.g. "hb px-1"). */
+.flex{display:flex}.flex-col{flex-direction:column}.items-center{align-items:center}.gap-0\.5{gap:.125rem}.gap-1{gap:.25rem}
+.px-1{padding-left:.25rem;padding-right:.25rem}.py-1{padding-top:.25rem;padding-bottom:.25rem}.w-9{width:2.25rem}
+.text-xs{font-size:.75rem;line-height:1rem}.text-center{text-align:center}.font-bold{font-weight:700}
+.text-gray-300{color:#d1d5db}.text-gray-400{color:#9ca3af}.text-gray-500{color:#6b7280}.text-red-400{color:#f87171}
+.hidden{display:none}
+.animate-pulse{animation:pulse 2s cubic-bezier(.4,0,.6,1) infinite}
+@keyframes pulse{50%{opacity:.5}}
 body{background:#080816;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:'Segoe UI',system-ui,sans-serif;overflow:hidden}
 #root{width:100%;height:100%}
 .game-container{overflow:hidden;display:flex;align-items:center;justify-content:center;background:#0c0c1e;transition:width .25s ease,height .25s ease;position:relative}
