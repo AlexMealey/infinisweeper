@@ -25,7 +25,7 @@ const yieldChannel=typeof MessageChannel!=='undefined'?new MessageChannel():null
 if(yieldChannel)yieldChannel.port1.onmessage=()=>{const resume=yieldQueue.shift();if(resume)resume()};
 const yieldToBrowser=()=>new Promise(resolve=>{if(yieldChannel){yieldQueue.push(resolve);yieldChannel.port2.postMessage(0)}else setTimeout(resolve,0)});
 
-// Each move that changed the board, as {diff, flagsDelta}. Mirrors replayMoveLog in game.js.
+// Each move that changed the board, as {diff, flagsDelta}. Mirrors applyLogEntry in game.js.
 function* replaySteps(seed,moveLog,showWrongFlags){
     const first=moveLog[0],firstClick=first&&first[0]==='r'?[first[1],first[2]]:null;
     const minefield=createMinefield(hashSeed(seed),firstClick),cells={};

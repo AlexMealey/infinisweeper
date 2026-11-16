@@ -6,6 +6,7 @@ require __DIR__ . '/lib.php';
 
 handle_preflight();
 require_post();
+ignore_user_abort(true); // a dropped connection mustn't stop a request between its file writes
 
 $body = read_json_body();
 
@@ -29,18 +30,17 @@ if (!is_valid_id($playerId)) error_response('bad playerId');
 
 if (count($moves) > MAX_MOVES_PER_REQ) $moves = array_slice($moves, 0, MAX_MOVES_PER_REQ);
 
-[$room, $lock] = load_room_locked($roomId);
+[$room, $lock] = open_room($roomId);
 if (!$room) error_response('room not found', 404);
 
 // --- This player's presence ---
 if (!isset($room['players']) || !is_array($room['players'])) $room['players'] = [];
 $player = $room['players'][$playerId] ?? [];
 
-// Checked before any other change; a rejected request still saves the bucket and lastSeen. The client backs off on 429.
+// Checked before any other change. A rejected request saves nothing: under 1 token the bucket refills to the same
+// level whether or not this attempt is recorded. The client backs off on 429.
 if (!take_rate_token($player)) {
-    $player['lastSeen'] = time();
-    $room['players'][$playerId] = $player;
-    save_room_and_unlock($room, $lock);
+    close_room($lock);
     error_response('rate limited', 429);
 }
 
@@ -50,15 +50,15 @@ $player['lastSeen'] = time();
 // {hidden: true}: the mouse left the board or the player stopped sharing it.
 if (is_array($cursor) && !empty($cursor['hidden'])) {
     $player['cursor'] = null;
-} elseif (is_array($cursor) && isset($cursor['x'], $cursor['y'])) {
+} elseif (is_array($cursor) && coord($cursor['x'] ?? null) !== null && coord($cursor['y'] ?? null) !== null) {
     $player['cursor'] = [
-        'x'        => (float)$cursor['x'],
-        'y'        => (float)$cursor['y'],
+        'x'        => coord($cursor['x']),
+        'y'        => coord($cursor['y']),
         'cellSize' => isset($cursor['cellSize']) ? (int)$cursor['cellSize'] : 36,
     ];
 }
 // The viewport centre, for other players' "go to" (whole cells).
-if (is_array($view) && isset($view['x'], $view['y'])) {
+if (is_array($view) && coord($view['x'] ?? null) !== null && coord($view['y'] ?? null) !== null) {
     $player['view'] = [
         'x' => (int)$view['x'],
         'y' => (int)$view['y'],
@@ -66,11 +66,11 @@ if (is_array($view) && isset($view['x'], $view['y'])) {
 }
 // A middle-click ping on a cell, announced to the others as an event. Bad or too-frequent pings are dropped.
 $pinged = false;
-if ($ping !== null && is_numeric($ping['x'] ?? null) && is_numeric($ping['y'] ?? null)) {
-    $px = (float)$ping['x'];
-    $py = (float)$ping['y'];
+if ($ping !== null && coord($ping['x'] ?? null) !== null && coord($ping['y'] ?? null) !== null) {
+    $px = coord($ping['x']);
+    $py = coord($ping['y']);
     $now = microtime(true);
-    if (abs($px) <= 1e9 && abs($py) <= 1e9 && $now - (float)($player['lastPingAt'] ?? 0) >= PING_MIN_GAP_SEC) {
+    if ($now - (float)($player['lastPingAt'] ?? 0) >= PING_MIN_GAP_SEC) {
         $player['lastPingAt'] = $now;
         add_event($room, 'ping', $playerId, $name, ['x' => (int)floor($px), 'y' => (int)floor($py)]);
         $pinged = true;
@@ -100,11 +100,15 @@ if ($clientHints !== null) {
 }
 
 // --- Moves ---
-// moveOwners runs parallel to moveLog, with the first 8 hex chars of each move's playerId. An undo isn't appended:
-// it rewrites the reveal it undoes and bumps logRevision, so every client refetches the whole log.
-$moveOwners  = $room['moveOwners'] ?? '';
-$moveLog     = $room['moveLog'] ?? '';
+// The owners file runs parallel to the log, with the first 8 hex chars of each move's playerId. An undo isn't
+// appended: it rewrites the reveal it undoes and bumps logRevision, so every client refetches the whole log.
 $logRevision = (int)($room['logRevision'] ?? 0);
+$owner       = substr($playerId, 0, 8);
+$log         = null; // the saved log, read only if an undo needs it
+$added       = '';   // entries this request appends
+$addedOwners = '';
+$undone      = [];   // offsets of saved reveals this request undoes, rewritten in place
+$newRound    = null; // [log, owners] when this request starts a round
 
 // Moves and resets made before someone else's reset belong to the old board, so they're dropped.
 if ($clientRound !== null && $clientRound !== (int)($room['round'] ?? 0)) {
@@ -116,21 +120,25 @@ $logChanges = 0;
 foreach ($moves as $m) {
     if (!is_array($m) || count($m) < 3) continue;
     $type = (string)$m[0];
-    if ($type !== 'r' && $type !== 'f' && $type !== 'u') continue;
+    if (($type !== 'r' && $type !== 'f' && $type !== 'u') || coord($m[1]) === null || coord($m[2]) === null) continue;
     $x = (int)$m[1];
     $y = (int)$m[2];
 
-    if ($type === 'u') {
-        if (undo_reveal($moveLog, $x, $y)) {
-            $logRevision++;
-            $logChanges++;
-            add_event($room, 'undo', $playerId, $name);
-        }
-    } else {
-        $moveLog    .= $type . $x . ',' . $y . ';';
-        $moveOwners .= substr($playerId, 0, 8) . ';';
+    if ($type !== 'u') {
+        $added       .= $type . $x . ',' . $y . ';';
+        $addedOwners .= $owner . ';';
         $logChanges++;
+        continue;
     }
+    if ($log === null && ($log = read_log($roomId, $room, 'log')) === null) { close_room($lock); error_response('room log damaged', 500); }
+    $all = $log . $added; // the reveal can be one sent earlier in this request
+    $at  = undo_reveal($all, $x, $y);
+    if ($at < 0) continue;
+    if ($at < strlen($log)) { $log[$at] = 'u'; $undone[] = $at; }
+    else $added = substr($all, strlen($log));
+    $logRevision++;
+    $logChanges++;
+    add_event($room, 'undo', $playerId, $name);
 }
 
 // --- Start over ---
@@ -150,16 +158,17 @@ if ($resetRequest !== null) {
     $loadLog   = $kind === 'load' ? $resetRequest['moveLog'] : '';
     $isFounder = isset($room['founderId']) && $room['founderId'] === $playerId;
     if ($isFounder || empty($resetRequest['needsVote'])) { // needsVote: the client has progress at stake
-        start_new_round($room, $moveLog, $moveOwners, $logRevision, $kind, $seed, $loadLog, substr($playerId, 0, 8));
+        $newRound = start_new_round($room, $logRevision, $kind, $seed, $loadLog, $owner);
         add_event($room, $kind, $playerId, $name);
-    } elseif (($voteBefore['status'] ?? null) !== 'open') {
-        $room['resetVote'] = [ // the requester's vote counts as yes
+    } elseif (($voteBefore['status'] ?? null) !== 'open'
+            && ($kind !== 'load' || file_put_contents(room_file($roomId, 'vote'), $loadLog) === strlen($loadLog))) {
+        $room['resetVote'] = [ // the requester's vote counts as yes; a save to load waits in <id>.vote
             'id'        => random_hex_id(4),
             'by'        => $playerId,
             'byName'    => $name,
             'kind'      => $kind,
             'seed'      => $seed,
-            'moveLog'   => $loadLog,
+            'loadMoves' => substr_count($loadLog, ';'),
             'votes'     => [$playerId => true],
             'createdAt' => time(),
             'status'    => 'open',
@@ -175,24 +184,45 @@ if ($voteReply !== null && ($room['resetVote']['status'] ?? null) === 'open'
 prune_stale_players($room);
 if (resolve_reset_vote($room) === 'passed') {
     $passed = $room['resetVote'];
-    start_new_round($room, $moveLog, $moveOwners, $logRevision, $passed['kind'], $passed['seed'],
-                    $passed['moveLog'] ?? '', substr((string)$passed['by'], 0, 8));
+    $loadLog = $passed['kind'] === 'load' ? (string)@file_get_contents(room_file($roomId, 'vote')) : '';
+    $newRound = start_new_round($room, $logRevision, $passed['kind'], $passed['seed'], $loadLog, substr((string)$passed['by'], 0, 8));
     $room['resetVote'] = $passed; // keeps the result visible for a moment
 }
 $voteChanged = $resetRequest !== null || $voteReply !== null || ($room['resetVote'] ?? null) !== $voteBefore;
 
 if ($logChanges > 0 || $cursor !== null || $view !== null || $clientHints !== null || $voteChanged || $pinged || !isset($room['version'])) {
     $room['version']      = ($room['version'] ?? 0) + 1;
-    $room['moveLog']      = $moveLog;
-    $room['moveOwners']   = $moveOwners;
-    $room['logRevision']  = $logRevision;
     $room['lastActivity'] = time();
 }
+$room['logRevision'] = $logRevision;
 
-save_room_and_unlock($room, $lock);
+// --- Commit ---
+// Log files first, then the state, whose save is the commit: until then the state still records the old ends, so a
+// failure here leaves the room as it was.
+$oldGen = (int)($room['logGen'] ?? 0);
+if ($newRound !== null) {
+    $undone = []; // the old round's log is dropped, not edited
+    $ok = write_log_files($roomId, $room, $newRound[0], $newRound[1]);
+} else {
+    $ok = append_log($roomId, $room, $added, $addedOwners);
+    foreach ($undone as $at) $ok = $ok && write_at(log_file($roomId, $room, 'log'), $at, 'u');
+}
+if (!$ok || !save_room($roomId, $room)) {
+    foreach ($undone as $at) write_at(log_file($roomId, $room, 'log'), $at, 'r'); // the saved state still has them as reveals
+    close_room($lock);
+    error_response('could not save the room', 500);
+}
+if ($newRound !== null) {
+    @unlink(room_file($roomId, "$oldGen.log"));
+    @unlink(room_file($roomId, "$oldGen.own"));
+}
+// A save waiting on a load vote is needed only while that vote is open.
+if (($voteBefore['kind'] ?? null) === 'load' || ($room['resetVote']['kind'] ?? null) === 'load') {
+    if (($room['resetVote']['status'] ?? null) !== 'open') @unlink(room_file($roomId, 'vote'));
+}
 
 // --- Response ---
-$moveIndex = $moveLog === '' ? 0 : substr_count($moveLog, ';');
+$moveIndex = (int)$room['moveCount'];
 $clientMoveIndex = isset($body['moveIndex']) ? (int)$body['moveIndex'] : 0;
 if ($clientMoveIndex < 0) $clientMoveIndex = 0;
 
@@ -217,24 +247,19 @@ $response = [
     'events'      => recent_events($room),
 ];
 
-if ($clientRevision < $logRevision) {
-    // Past entries changed, so the client rebuilds from the whole log.
-    $response['moveLog']    = $moveLog;
-    $response['moveOwners'] = $moveOwners;
+// The whole log when past entries changed (an undo or a new round), when the client is ahead of the server (it last
+// talked to another deploy), or when it's far behind (a join): one string is far smaller than an array of moves.
+// Every client version treats the string as a fresh copy.
+$newMoves = ($clientRevision !== $logRevision || $clientMoveIndex > $moveIndex || $moveIndex - $clientMoveIndex > FULL_LOG_GAP)
+    ? null : read_new_moves($roomId, $room, $clientMoveIndex);
+if ($newMoves === null) {
+    $response['moveLog']    = read_log($roomId, $room, 'log');
+    $response['moveOwners'] = read_log($roomId, $room, 'own');
     $response['newMoves']   = [];
+    if ($response['moveLog'] === null || $response['moveOwners'] === null) { close_room($lock); error_response('room log damaged', 500); }
 } else {
-    $newMoves = [];
-    if ($clientMoveIndex < $moveIndex) {
-        $entries = explode(';', rtrim($moveLog, ';'));
-        $owners  = explode(';', rtrim($moveOwners, ';'));
-        for ($i = $clientMoveIndex; $i < count($entries); $i++) {
-            $move = parse_move($entries[$i]);
-            if ($move === null) continue;
-            $move[] = $owners[$i] ?? '';
-            $newMoves[] = $move;
-        }
-    }
     $response['newMoves'] = $newMoves;
 }
+close_room($lock); // before encoding and sending, so a slow client never holds up the room
 
 json_response($response);

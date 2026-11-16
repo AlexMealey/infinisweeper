@@ -1,9 +1,17 @@
 // components.js – React UI components (JSX, compiled by Babel in the browser)
 const{useState,useCallback,useMemo,useEffect,useRef,memo}=React;
 
+// Off while one update reveals so many cells that animating each would stutter (a big flood fill, a rebuilt board).
+let cellPopAllowed=true;
+window.setCellPop=on=>{cellPopAllowed=on};
+
 // chordTarget: a hidden cell a chord on the hovered number would open. chordReady: that number itself.
 window.Cell=memo(({x,y,state,gameOver,chordTarget,chordReady,pulse,size,onReveal,onFlag,onHover,onLeave})=>{
     const style=useMemo(()=>({width:size,height:size,fontSize:Math.max(9,size*.37)}),[size]);
+    // Pops in when revealed on screen, not when it pans or zooms into view already revealed. Decided once per reveal,
+    // so a later re-render never restarts it.
+    const shownState=useRef(state),pop=useRef(false);
+    if(shownState.current!==state){if(!shownState.current&&state&&state[0]==='r')pop.current=cellPopAllowed;shownState.current=state}
     let className='cell ',content='';
     if(state==='exp'){className+='cell-exp';content='💥'}
     else if(state==='mine'){className+='cell-mine';content='💣'}
@@ -11,10 +19,18 @@ window.Cell=memo(({x,y,state,gameOver,chordTarget,chordReady,pulse,size,onReveal
     else if(state==='flag-bad'){className+='cell-flag-bad';content=<><span style={{opacity:.7}}>🚩</span><span className="wrong-x" style={{fontSize:size*.5}}>✕</span></>}
     else if(state==='flag'){className+='cell-flag';content='🚩'}
     else if(state==='quest'){className+='cell-hidden';content='❓'}
-    else if(state&&state[0]==='r'){className+='cell-rev';if(chordReady)className+=' cell-cr';const count=+state[1];if(count)content=<span className={`n${count}`}>{count}</span>}
+    else if(state&&state[0]==='r'){className+=pop.current?'cell-rev cell-pop':'cell-rev';if(chordReady)className+=' cell-cr';const count=+state[1];if(count)content=<span className={`n${count}`}>{count}</span>}
     else{className+='cell-hidden';if(chordTarget)className+=' cell-hl';else if(pulse)className+=' cell-pulse'}
     return<div className={className} style={style} onClick={e=>{e.preventDefault();if(!gameOver)onReveal(x,y)}} onContextMenu={e=>{e.preventDefault();if(!gameOver)onFlag(x,y)}} onMouseEnter={()=>onHover(x,y)} onMouseLeave={onLeave}>{content}</div>;
 });
+
+// The grid on its own, so re-renders elsewhere (toasts, status, polls) skip its thousands of cells. Its size is fixed,
+// so it's contained: nothing inside affects layout or paint outside it.
+window.BoardGrid=memo(({cols,rows,cellSize,children})=>(
+    <div style={{display:'grid',gridTemplateColumns:`repeat(${cols},${cellSize}px)`,gridTemplateRows:`repeat(${rows},${cellSize}px)`,width:cols*cellSize,height:rows*cellSize,contain:'strict'}}>
+        {children}
+    </div>
+));
 
 function useEscapeKey(onEscape){
     const handler=useRef(onEscape);handler.current=onEscape;
@@ -130,6 +146,13 @@ window.SettingsModal=function SettingsModal({hints,setHints,uiSettings,setUiSett
                     <Checkbox label="Seed input" dim checked={uiSettings.showSeedBox} onChange={e=>setUiSettings(u=>({...u,showSeedBox:e.target.checked}))}/>
                     <Checkbox label="Lock button" dim checked={uiSettings.showLockBtn} onChange={e=>setUiSettings(u=>({...u,showLockBtn:e.target.checked}))}/>
                 </SubOptions>}
+                <div style={{display:'flex',alignItems:'center',gap:8,padding:'2px 0'}}>
+                    <span style={{color:'#aaa',fontSize:12,minWidth:82}}>Board effects</span>
+                    <select className="hs" value={uiSettings.boardFx||'full'} onChange={e=>setUiSettings(u=>({...u,boardFx:e.target.value}))}>
+                        <option value="full">Full</option><option value="reduced">Reduced</option><option value="off">Off</option>
+                    </select>
+                </div>
+                <div style={{color:'#777',fontSize:11,paddingLeft:90}}>Reduced drops the animations and soft shadows; Off also flattens the tiles. For slower devices.</div>
 
                 <SectionHeading>Multiplayer</SectionHeading>
                 <ColorChoice value={uiSettings.myColor||''} onChange={c=>setUiSettings(u=>({...u,myColor:c}))}/>
