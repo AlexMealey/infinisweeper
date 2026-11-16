@@ -17,7 +17,7 @@ window.setSeedInURL=function(seed){const u=new URL(window.location);u.searchPara
 window.seededRandom=function(x,y,seed){let h=seed^(x*374761393)^(y*668265263);h=Math.imul(h^(h>>>15),h|1);h^=h+Math.imul(h^(h>>>7),h|61);return((h^(h>>>14))>>>0)/4294967296};
 // Fills in hint settings that older saves lack (freeUndo became undoEnabled).
 window.migrateHints=function(saved){
-    const defaults={wrongFlags:false,pulseNeighbors:false,undoEnabled:false,undoMode:'refill',chordFlag:false};
+    const defaults={wrongFlags:false,pulseNeighbors:false,undoEnabled:true,undoMode:'infinite',chordFlag:true};
     if(!saved)return defaults;
     const undoEnabled='undoEnabled'in saved?!!saved.undoEnabled:!!saved.freeUndo;
     const undoMode=saved.undoMode==='infinite'||saved.undoMode==='stack'?saved.undoMode:'refill';

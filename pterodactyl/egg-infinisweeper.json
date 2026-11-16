@@ -1,0 +1,82 @@
+{
+    "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PTERODACTYL PANEL - PTERODACTYL.IO",
+    "meta": {
+        "version": "PTDL_v2",
+        "update_url": null
+    },
+    "exported_at": "2026-11-02T10:00:00+00:00",
+    "name": "InfiniSweeper",
+    "author": "ammealey@googlemail.com",
+    "description": "Infinite co-op minesweeper. Serves the game and its PHP multiplayer backend on the server's primary allocation port. Multiplayer room saves are kept in data/rooms.",
+    "features": null,
+    "docker_images": {
+        "Debian": "ghcr.io/parkervcp/yolks:debian"
+    },
+    "file_denylist": [],
+    "startup": "if [ \"{{AUTO_UPDATE}}\" = \"1\" ] && [ -d .git ]; then git fetch -q --depth 1 origin {{GIT_BRANCH}} && git reset --hard FETCH_HEAD; fi; runtime/php -c pterodactyl/php.ini -q -S 0.0.0.0:{{SERVER_PORT}} -t . pterodactyl/router.php",
+    "config": {
+        "files": "{}",
+        "startup": "{\n    \"done\": \"Development Server\"\n}",
+        "logs": "{}",
+        "stop": "^C"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!/bin/bash\n# InfiniSweeper install script. Runs as root in the installer container, with the server's files at /mnt/server.\n# Reinstalling updates the game and PHP. Room saves in data/rooms are gitignored, so they're kept.\nset -euo pipefail\ncd /mnt/server\n\necho \"== Fetching ${GIT_REPO} (${GIT_BRANCH})\"\ngit config --global --add safe.directory /mnt/server   # the folder belongs to the server's user, not root\n[ -d .git ] || git init -q\ngit remote add origin \"${GIT_REPO}\" 2>/dev/null || git remote set-url origin \"${GIT_REPO}\"\ngit fetch -q --depth 1 origin \"${GIT_BRANCH}\"\ngit reset --hard FETCH_HEAD\n\n# The official PHP images don't run an egg's startup command, so the server runs on a plain yolk image with a static\n# PHP build from static-php.dev, kept in runtime/.\nARCH=$(uname -m)   # x86_64 or aarch64, as static-php.dev names them\nLISTING=https://dl.static-php.dev/static-php-cli/common/\nFILE=$(curl -fsSL \"$LISTING\" | grep -oE \"php-${PHP_VERSION}\\.[0-9]+-cli-linux-${ARCH}\\.tar\\.gz\" | sort -uV | tail -n 1) || true\nif [ -z \"$FILE\" ]; then\n    echo \"No static PHP ${PHP_VERSION} build for ${ARCH} at ${LISTING}\" >&2\n    exit 1\nfi\necho \"== Installing ${FILE}\"\nrm -rf runtime\nmkdir runtime\ncurl -fsSL \"${LISTING}${FILE}\" | tar xz -C runtime php\nchmod 755 runtime/php\nruntime/php -v\n\necho \"== Done. Start the server, then open http://<server address>:<port>\"\n",
+            "container": "ghcr.io/parkervcp/installers:debian",
+            "entrypoint": "bash"
+        }
+    },
+    "variables": [
+        {
+            "name": "Git Repository",
+            "description": "Where the game is downloaded from. Reinstall the server after changing it.",
+            "env_variable": "GIT_REPO",
+            "default_value": "https://github.com/AlexMealey/infinisweeper.git",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:256",
+            "field_type": "text"
+        },
+        {
+            "name": "Git Branch",
+            "description": "Branch to install and update from.",
+            "env_variable": "GIT_BRANCH",
+            "default_value": "main",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:100|regex:/^[A-Za-z0-9._\\/-]+$/",
+            "field_type": "text"
+        },
+        {
+            "name": "Auto Update",
+            "description": "1 pulls the latest code from the branch every time the server starts. 0 keeps what's installed. Files you edit in the server folder are overwritten either way on update; room saves are kept.",
+            "env_variable": "AUTO_UPDATE",
+            "default_value": "1",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "PHP Workers",
+            "description": "How many requests PHP handles at once. Each multiplayer player polls up to 10 times a second; 4 is plenty for a few busy rooms.",
+            "env_variable": "PHP_CLI_SERVER_WORKERS",
+            "default_value": "4",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|between:1,32",
+            "field_type": "text"
+        },
+        {
+            "name": "PHP Version",
+            "description": "Static PHP build downloaded from static-php.dev at install; the newest patch release of this version is used. Reinstall the server after changing it.",
+            "env_variable": "PHP_VERSION",
+            "default_value": "8.4",
+            "user_viewable": true,
+            "user_editable": false,
+            "rules": "required|string|regex:/^8\\.[0-9]+$/",
+            "field_type": "text"
+        }
+    ]
+}

@@ -1,7 +1,7 @@
 // app.js – App component and ReactDOM render (JSX, compiled by Babel in the browser)
 const{useState,useCallback,useMemo,useEffect,useRef}=React;
 
-const DEFAULT_UI_SETTINGS={showArrows:true,showScores:true,showLeaderboard:true,showUndo:true,showZoom:true,showCoords:true,showSeed:true,showSeedBox:true,showLockBtn:true,defaultCellSize:CELL_SIZE_DEFAULT,exportRes:'auto',tlMovesPerFrame:1,tlFps:60,tlRes:'auto',myColor:'',cursorSee:'off',cursorSend:'normal',pingQuality:'full',boardFx:'full'};
+const DEFAULT_UI_SETTINGS={showArrows:false,showScores:true,showLeaderboard:true,showUndo:false,showZoom:true,showCoords:false,showSeed:false,showSeedBox:true,showLockBtn:true,defaultCellSize:CELL_SIZE_DEFAULT,exportRes:'auto',tlMovesPerFrame:1,tlFps:60,tlRes:'auto',myColor:'',cursorSee:'normal',cursorSend:'normal',pingQuality:'light'};
 const CLEARED_PER_UNDO=1000;
 const MAX_VIDEO_BYTES=50e6; // timelapse.js has the same limit
 const PING_SHOW_MS=4000,MAX_PINGS_SHOWN=10,PING_COOLDOWN_MS=400; // middle-click pings in a room
