@@ -155,11 +155,11 @@ window.applyChordFlag=function(cells,x,y,mutate){
 // A board built from its move log one entry at a time, in place, so a new move costs only what it changes.
 // losingMoveIndex is the reveal that hit a mine (-1 if none), which an undo rewrites; in a room, other players'
 // clicks can be logged after it. preset: a version 1 save's {cells, firstClick, moves, flags, gameOver}, which has no log.
-const BOARD_FIELDS=['moves','flags','cleared','gameOver','losingMoveIndex','firstClick','minefield','clearedAtLastUndo','undoUsedCount','length'];
+const BOARD_FIELDS=['moves','flags','cleared','gameOver','losingMoveIndex','firstClick','minefield','clearedAtLastUndo','undoUsedCount','length','loss'];
 window.createBoard=function(seed,showWrongFlags,preset){
     const p=preset||{},seedNum=hashSeed(seed),firstClick=p.firstClick||null;
     const board={seed,seedNum,showWrongFlags:!!showWrongFlags,cells:p.cells||{},moves:p.moves||0,flags:p.flags||0,cleared:0,gameOver:!!p.gameOver,
-        losingMoveIndex:-1,firstClick,minefield:createMinefield(seedNum,firstClick),clearedAtLastUndo:null,undoUsedCount:0,length:0,journal:null,dirty:false};
+        losingMoveIndex:-1,firstClick,minefield:createMinefield(seedNum,firstClick),clearedAtLastUndo:null,undoUsedCount:0,length:0,journal:null,dirty:false,loss:null};
     for(const key in board.cells){const s=board.cells[key];if(s&&s[0]==='r')board.cleared++}
     return board;
 };
@@ -180,7 +180,8 @@ window.applyLogEntry=function(board,entry,journal){
         diff=r.diff;
         for(const[,state]of diff)if(state&&state[0]==='r')board.cleared++;
         board.moves+=r.movesDelta;
-        if(r.gameOver){board.gameOver=true;board.losingMoveIndex=index}
+        // What undoLoss needs to take the losing reveal back off without a replay.
+        if(r.gameOver){board.loss={index,losingMoveIndex:board.losingMoveIndex,movesDelta:r.movesDelta,diff};board.gameOver=true;board.losingMoveIndex=index}
     }else if(type==='f'){
         const r=applyFlag(board.cells,x,y,true);
         if(!r.changed)return null;
@@ -205,6 +206,38 @@ window.rollbackBoard=function(board){
     }
     Object.assign(board,journal.before);
     board.journal=null;
+};
+// The undo of a loss without a replay: takes the losing reveal back off, then plays log from it on (the reveal now
+// rewritten as 'u', and in a room any clicks logged after it), as boardFromLog would; entries from journalFrom on are
+// journaled. Returns false, changing nothing, if the board has no loss to take off or a journal running.
+function undoLoss(board,log,journalFrom){
+    const loss=board.loss;
+    if(!loss||!board.gameOver||board.journal||loss.index!==board.losingMoveIndex||loss.index>=log.length)return false;
+    for(let i=loss.diff.length-1;i>=0;i--){
+        const[key,state]=loss.diff[i],before=stateBefore(state);
+        if(state&&state[0]==='r')board.cleared--;
+        if(before===undefined)delete board.cells[key];else board.cells[key]=before;
+    }
+    board.moves-=loss.movesDelta;
+    board.gameOver=false;board.losingMoveIndex=loss.losingMoveIndex;board.length=loss.index;board.loss=null;
+    for(let i=loss.index;i<log.length;i++)applyLogEntry(board,log[i],i>=journalFrom);
+    return true;
+}
+// Brings a board built from log up to target without a replay, which on a long log takes seconds: target has to
+// start with log (only the rest is played), or first differ from it at the board's losing reveal, now undone. Entries
+// from journalFrom on are journaled. Returns false if it can't, having taken any journaled entries back off (and
+// shortened log to match), so the caller rebuilds from target.
+window.fastForwardBoard=function(board,log,target,journalFrom=Infinity){
+    rollbackBoard(board);
+    const n=board.length;
+    if(!n||n>log.length)return false; // nothing a rebuild would cost; a version 1 board has cells but no log
+    log.length=n;
+    let d=0;const end=Math.min(n,target.length);
+    while(d<end){const a=log[d],b=target[d];if(a[0]!==b[0]||a[1]!==b[1]||a[2]!==b[2])break;d++}
+    if(d===n){for(let i=n;i<target.length;i++)applyLogEntry(board,target[i],i>=journalFrom);return true}
+    const loss=board.loss,ours=log[d],theirs=target[d];
+    if(!loss||d!==loss.index||ours[0]!=='r'||theirs[0]!=='u'||ours[1]!==theirs[1]||ours[2]!==theirs[2])return false;
+    return undoLoss(board,target,journalFrom);
 };
 // A click is kept only if it changed the board; one that does nothing isn't logged or sent.
 window.applyMove=function(board,entry,journal){
@@ -236,8 +269,9 @@ window.mergePendingMoves=function(log,pending){
     return log;
 };
 // A room's board after a sync: the server's log with our moves it hasn't had yet (pending) on top, as replaying both
-// would give. added: the server's entries since the last sync. It rebuilds only when it must (the server sent its
-// whole log, the seed or wrong-flag setting changed, or an undo is involved); otherwise our moves come back off, the
+// would give. added: the server's entries since the last sync. When the server sent its whole log, the seed or
+// wrong-flag setting changed, or an undo is involved, it brings the board up to the new log (fastForwardBoard), or
+// rebuilds it if that can't; otherwise our moves come back off, the
 // server's go on (ours among them, in its order) and the ones it hasn't had go back on top. log is the move log the
 // board was built from, kept the same length as the board. Returns {board, log}, or null if nothing changed.
 window.syncBoard=function(board,log,serverLog,added,fullLog,seed,showWrongFlags,pending){
@@ -245,16 +279,18 @@ window.syncBoard=function(board,log,serverLog,added,fullLog,seed,showWrongFlags,
     if(!rebuild&&!added.length)return null;
     const undoPending=pending.some(m=>m[0]==='u');
     if(rebuild||undoPending){
-        log=serverLog.slice();board=createBoard(seed,showWrongFlags);
-        if(undoPending){
-            // An undo rewrites an earlier entry, so the next sync rebuilds again rather than taking it back off.
-            mergePendingMoves(log,pending);
-            for(const entry of log)applyLogEntry(board,entry);
-            board.dirty=true;
-        }else{
-            for(const entry of log)applyLogEntry(board,entry);
-            for(const m of pending){const entry=[m[0],m[1],m[2]];log.push(entry);applyLogEntry(board,entry,true)}
+        // Our undo rewrites an entry the server has, which can't be taken back off, so the next sync checks the
+        // board against the server's log (dirty). Our other moves go on the end, journaled as usual.
+        const target=undoPending?mergePendingMoves(serverLog.slice(),pending):serverLog.slice();
+        const journalFrom=undoPending?serverLog.length:Infinity;
+        const sameRules=board.seed===seed&&board.showWrongFlags===!!showWrongFlags;
+        if(!(sameRules&&fastForwardBoard(board,log,target,journalFrom))){
+            board=createBoard(seed,showWrongFlags);
+            for(let i=0;i<target.length;i++)applyLogEntry(board,target[i],i>=journalFrom);
         }
+        log=target;
+        board.dirty=undoPending;
+        if(!undoPending)for(const m of pending){const entry=[m[0],m[1],m[2]];log.push(entry);applyLogEntry(board,entry,true)}
         return{board,log};
     }
     rollbackBoard(board);

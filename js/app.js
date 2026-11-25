@@ -816,9 +816,14 @@ function App(){
         const[,x,y]=log[losingIndex];
         // In a room the server rewrites its log too and every client rebuilds; until then applyServerMoves keeps ours.
         if(mpSyncingRef.current)Net.sendMove(['u',x,y]);
-        log[losingIndex]=['u',x,y];
-        const board=boardFromLog(boardRef.current.seed,log,hints.wrongFlags);
-        board.dirty=!!mpRoomId; // an undo can't be taken back off, so the next sync rebuilds from the server's log
+        const undone=log.slice();undone[losingIndex]=['u',x,y];
+        // Taking just the losing reveal back off is instant; a replay of a long log takes seconds. Rebuild if it can't.
+        // In a room, our moves the server hasn't confirmed stay journaled, so the next sync can still take them off.
+        let board=boardRef.current;
+        const journalFrom=board.journal?board.journal.before.length:Infinity;
+        if(!(window.fastForwardBoard&&board.showWrongFlags===!!hints.wrongFlags&&fastForwardBoard(board,log,undone,journalFrom)))board=boardFromLog(board.seed,undone,hints.wrongFlags);
+        moveLogRef.current=undone;
+        board.dirty=!!mpRoomId; // the next sync checks the board against the server's rewritten log
         boardRef.current=board;
         flagMapRef.current={};
         v1FramesRef.current=null;
