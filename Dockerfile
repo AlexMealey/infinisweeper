@@ -1,4 +1,4 @@
-FROM php:8.5-apache
+FROM php:8.6-apache
 
 # Production php.ini: no display_errors, sane limits.
 RUN mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini"
